@@ -6,6 +6,11 @@
 set -euo pipefail
 
 MGMT_DNS=10.10.0.1
+# Fixed addresses outside the sites (see docs/architecture.md, "Addressing plan").
+PROM_IP=10.10.0.10          # prom-01.ssle
+SIEM_IP=10.10.0.20          # siem-01.ssle
+INET_SUBNET=192.168.100.0/24
+CLIENT_IP=192.168.100.20    # client-01.inet
 
 REPO=$(dirname "$(realpath "$0")")/..
 IMAGE=images:ubuntu/22.04
@@ -49,6 +54,16 @@ ensure_project() {
     fi
 }
 
+# ensure_network_key <network> <key> <value>
+# Sets one key only if it differs: any change restarts the network's dnsmasq (a short DNS outage).
+ensure_network_key() {
+    local net=$1 key=$2 value=$3
+    if [ "$(incus network get "$net" "$key")" != "$value" ]; then
+        incus network set "$net" "$key=$value"
+        echo "network $net: $key=$value"
+    fi
+}
+
 # ensure_dnsmasq_line <network> <line>
 # Appends one line to the network's raw.dnsmasq, only if it isn't there yet.
 # Keeps the lines other sites added (raw.dnsmasq is one multi-line string).
@@ -81,17 +96,29 @@ ensure_secrets() {
     . "$file"
 }
 
-# ensure_instance <project> <name> <network> [owner]
-# Launches the container if it doesn't exist, and waits until it has working DNS + internet (apt needs it).
-# user.owner is set on every run, so a hand-made change is put back to what the config says (drift).
+# ensure_instance <project> <name> <network> <fixed address> [owner]
+# Creates the container if it doesn't exist, pins its address, and waits until it has working DNS +
+# internet (apt needs it). user.owner is set on every run, so a hand-made change is put back to what the
+# config says (drift).
 ensure_instance() {
-    local project=$1 inst=$2 net=$3 owner=${4:-}
+    local project=$1 inst=$2 net=$3 addr=$4 owner=${5:-} new=
     if incus info "$inst" --project "$project" > /dev/null 2>&1; then
         echo "instance $inst: already exists"
     else
-        incus launch "$IMAGE" "$inst" --project "$project" --network "$net" > /dev/null
-        echo "instance $inst: launched"
+        incus create "$IMAGE" "$inst" --project "$project" --network "$net" > /dev/null
+        echo "instance $inst: created"
+        new=1
     fi
+    # Fixed address (a DHCP reservation) + anti-spoofing: the container can't send from any other IP or MAC.
+    # Without the filtering, a compromised container could take a trusted IP and pass the firewall rules.
+    if [ "$(incus config device get "$inst" eth0 ipv4.address --project "$project")" != "$addr" ]; then
+        [ -n "$new" ] || incus stop "$inst" --project "$project"
+        incus config device set "$inst" eth0 ipv4.address="$addr" \
+            security.ipv4_filtering=true security.mac_filtering=true --project "$project"
+        echo "instance $inst: address $addr"
+        [ -n "$new" ] || incus start "$inst" --project "$project"
+    fi
+    [ -z "$new" ] || incus start "$inst" --project "$project"
     if [ -n "$owner" ]; then
         incus config set "$inst" --project "$project" user.owner="$owner"
     fi
@@ -212,6 +239,8 @@ provision_lb() {
     if ! incus config device get "$i" eth1 network --project "$p" > /dev/null 2>&1; then
         incus config device add "$i" eth1 nic network=inet ipv4.address="$public" --project "$p" > /dev/null
     fi
+    # Set on every run (not only when the card is added), so an older card also gets anti-spoofing.
+    incus config device set "$i" eth1 security.ipv4_filtering=true security.mac_filtering=true --project "$p"
     # eth1 only for the clients: no default route and no DNS from inet (those stay on the site network).
     run_in "$p" "$i" sh -c 'umask 077; cat > /etc/netplan/20-inet.yaml' <<'NETPLAN'
 network:
@@ -266,11 +295,94 @@ provision_client() {
     echo "instance $i: client ready"
 }
 
+# --- Firewall: Incus network ACLs, deny by default --------------------------------------------------
+# One ACL per role and site (acl-<site>-<role>), attached to the instances' network cards. Anything not
+# allowed here is dropped (incoming) or rejected (outgoing), and logged: a blocked attempt is itself a
+# detection signal (e.g. a compromised api-01 trying to reach lb-01).
+# Rules use IPs because bridge ACLs can't match "instances that have ACL x" (tested: "Unsupported
+# nftables subject"). Replies to allowed connections pass automatically (the rules are stateful).
+
+# ips_of <site> <role>...: comma-separated fixed IPs of the site's instances with those roles
+ips_of() {
+    local site=$1 prefix; shift
+    read -r _ prefix _ < <(site_info "$site")
+    awk -v s="$site" -v p="$prefix" -v roles=" $* " \
+        '$1 == s && index(roles, " " $3 " ") { printf "%s%s.%s", sep, p, $4; sep = "," }' "$INSTANCES_CONF"
+}
+
+# acl_rule <ingress|egress> <protocol> <peers|any> <port(s)> <description>  -> one YAML rule
+# Peers empty = the role doesn't exist (yet) in this site = no rule.
+acl_rule() {
+    local dir=$1 proto=$2 peers=$3 port=$4 desc=$5 key=destination
+    [ -n "$peers" ] || return 0
+    [ "$dir" = ingress ] && key=source
+    echo "- action: allow"
+    echo "  state: enabled"
+    echo "  protocol: $proto"
+    [ "$peers" = any ] || echo "  $key: $peers"
+    echo "  destination_port: \"$port\""
+    echo "  description: \"$desc\""
+}
+
+# acl_yaml <site> <role>: the call graph (docs/architecture.md) written as rules
+acl_yaml() {
+    local site=$1 role=$2 prefix gw lb backends db prom prom_site
+    read -r _ prefix _ < <(site_info "$site")
+    gw=$prefix.1
+    lb=$(ips_of "$site" lb); backends=$(ips_of "$site" api analytics); db=$(ips_of "$site" db)
+    prom_site=$(ips_of "$site" prom)                         # the site's own Prometheus (lis), if any
+    prom=$PROM_IP${prom_site:+,$prom_site}
+
+    echo "description: deny by default; $role in $site (generated by build.sh, edits are overwritten)"
+    echo "ingress:"
+    case $role in
+        lb)            acl_rule ingress tcp "$INET_SUBNET" 80   "clients (inet) -> nginx" ;;
+        api|analytics) acl_rule ingress tcp "$lb"          5000 "lb -> app"
+                       acl_rule ingress tcp "$prom"        9102 "prometheus -> app /metrics" ;;
+        db)            acl_rule ingress tcp "$backends"    5432 "api, analytics -> postgres" ;;
+    esac
+    echo "egress:"
+    case $role in
+        lb)            acl_rule egress tcp "$backends" 5000 "nginx -> api, analytics" ;;
+        api|analytics) acl_rule egress tcp "$db"       5432 "app -> postgres" ;;
+    esac
+    # Flows every instance needs (deny by default would silently break them):
+    acl_rule egress udp "$gw"      53        "DNS (site dnsmasq)"
+    acl_rule egress tcp "$gw"      53        "DNS over TCP (large answers)"
+    acl_rule egress tcp "$SIEM_IP" 1514,1515 "wazuh agent -> manager (events, enrollment)"
+    # Limitation: apt needs the internet, so web traffic out is allowed to ANY address. That's also an
+    # exfiltration path for an APT. Internal targets are still protected by their own ingress rules.
+    # Better: an apt proxy (allow only it), or remove this rule after the build.
+    acl_rule egress tcp any        80,443    "apt updates (any address)"
+}
+
+# ensure_acls <site>: (re)writes each role's ACL and attaches it to the site's instances
+ensure_acls() {
+    local site=$1 inst role nic acl
+    for role in $(awk -v s="$site" '$1 == s { print $3 }' "$INSTANCES_CONF" | sort -u); do
+        acl=acl-$site-$role
+        incus network acl show "$acl" > /dev/null 2>&1 || incus network acl create "$acl" > /dev/null
+        acl_yaml "$site" "$role" | incus network acl edit "$acl"   # replaces all rules: no stale ones
+        echo "firewall: $acl written"
+    done
+    while read -r inst role <&3; do
+        for nic in $(incus config device list "$inst" --project "$site"); do
+            incus config device set "$inst" "$nic" --project "$site" security.acls="acl-$site-$role" \
+                security.acls.default.ingress.action=drop security.acls.default.egress.action=reject \
+                security.acls.default.ingress.logged=true security.acls.default.egress.logged=true
+        done
+        echo "firewall: $inst -> acl-$site-$role"
+    done 3< <(awk -v s="$site" '$1 == s { print $2, $3 }' "$INSTANCES_CONF")
+}
+
 core() {
     ensure_network ssle-mgmt ipv4.address=$MGMT_DNS/24 ipv4.nat=true ipv6.address=none dns.domain=ssle
     ensure_network inet ipv4.address=192.168.100.1/24 ipv4.nat=true ipv6.address=none dns.domain=inet
+    # .2-.99 fixed addresses, .100-.254 DHCP: a dynamic lease can never take a fixed address.
+    ensure_network_key ssle-mgmt ipv4.dhcp.ranges 10.10.0.100-10.10.0.254
+    ensure_network_key inet ipv4.dhcp.ranges 192.168.100.100-192.168.100.254
     # Outside actors live in the default project (they belong to no site).
-    ensure_instance default client-01 inet
+    ensure_instance default client-01 inet "$CLIENT_IP"
     provision_client default client-01
 }
 
@@ -280,6 +392,7 @@ site() {
     domain=$name.$region.ssle
 
     ensure_network "ssle-$name" ipv4.address="$prefix.1/24" ipv4.nat=true ipv6.address=none dns.domain="$domain"
+    ensure_network_key "ssle-$name" ipv4.dhcp.ranges "$prefix.100-$prefix.254"
     ensure_project "$name"
 
     # Delegation, both directions (see docs/architecture.md, "DNS delegation"):
@@ -287,18 +400,21 @@ site() {
     ensure_dnsmasq_line "ssle-$name" "server=/ssle/$MGMT_DNS"     # the site asks mgmt about the rest
 
     ensure_secrets "$name"
-    local inst role owner
-    while read -r inst role owner <&3; do
-        ensure_instance "$name" "$inst" "ssle-$name" "$owner"
+    local inst role host owner
+    while read -r inst role host owner <&3; do
+        ensure_instance "$name" "$inst" "ssle-$name" "$prefix.$host" "$owner"
         case $role in
             db)  provision_db  "$name" "$inst" "$prefix.0/24" ;;
             api) provision_api "$name" "$inst" "$domain" ;;
             lb)  provision_lb  "$name" "$inst" "$name" "$domain" "$public" ;;
             *)   echo "instance $inst: role '$role' not written yet, skipped" >&2 ;;
         esac
-    done 3< <(awk -v s="$name" '$1 == s { print $2, $3, $4 }' "$INSTANCES_CONF")
+    done 3< <(awk -v s="$name" '$1 == s { print $2, $3, $4, $5 }' "$INSTANCES_CONF")
     # The list is read from fd 3, not stdin: incus exec inside the loop reads stdin and would
     # otherwise swallow the remaining lines (only the first instance would be built).
+
+    # Last: the firewall, once every instance and its address exist.
+    ensure_acls "$name"
 }
 
 case "${1:-}" in
