@@ -14,7 +14,7 @@ Teacher guidelines: `Projeto.pdf`. Grading: report 50% and demo/repository 50%.
 
 ## Naming scheme
 See `docs/naming.md` (a named grading aspect). DNS-style format: `<service>-<instance>.<site>.<region>.<org>`.
-Decided: host and owner are metadata, not part of the name. `user.host` is set on every instance. Owner is
+Decided: host and owner are metadata, not part of the name. Host is observed by the per-host exporter, never declared (no `user.host`). Owner is
 hybrid: each zone has a default owner (table in naming.md) and `user.owner` is set only where it differs.
 Instance numbers are unique per site. There will be a second site to show scalability, and outside actors
 (client, attacker) get their own separate zone.

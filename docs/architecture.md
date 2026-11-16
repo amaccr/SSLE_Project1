@@ -56,7 +56,7 @@ apps, so the apps also expose their own `/metrics`. The two answer different que
 (Incus also has built-in network zones, which is more setup for the same idea.)
 - mgmt → sites: needed, so Prometheus can find targets by name.
 - sites → mgmt: needed, so agents find `siem-01.ssle`: forward `ssle` from each site to `10.10.0.1`
-  (test that the site's own zone still answers locally).
+  (tested: the site's own zone still answers locally, see "DNS test" below).
 - site ↔ site: not added. Each site is self-contained, and less resolution means less attack surface.
 
 Limitations: if the mgmt DNS goes down, cross-zone resolution fails. There is no DNSSEC (`resolvectl` shows
@@ -108,3 +108,46 @@ These cross from `ssle-mgmt` into the site networks through the VM. Each row bec
 | site DNS (10.10.1.1, 10.10.2.1) | ssle-mgmt DNS (10.10.0.1) | 53 | zone `ssle` (agents find siem-01) |
 | admin (VM) | siem-01.ssle | 443/tcp | Wazuh dashboard |
 | admin (VM) | prom-01.ssle | 9090/tcp | Prometheus UI |
+
+## DNS test: does a site resolve its own names when the mgmt DNS is down?
+
+Setup: throwaway containers `t-avr` (project `avr`, network `ssle-avr`) and `t-mgmt` (project `default`,
+network `ssle-mgmt`). The mgmt DNS was taken down by killing its dnsmasq, and both containers' caches were
+flushed with `resolvectl flush-caches` so that a cached answer could not hide the result.
+
+| Query | From | mgmt DNS up | mgmt DNS down |
+|---|---|---|---|
+| t-avr.avr.pt.ssle | t-avr | resolves (exit 0) | resolves (exit 0) |
+| t-mgmt.ssle | t-avr | resolves (exit 0) | fails (exit 2) after ~20 s |
+| t-avr.avr.pt.ssle | t-mgmt | resolves (exit 0) | fails (exit 2) |
+| t-mgmt.ssle | t-mgmt | resolves (exit 0) | fails (exit 2) |
+
+**Why avr still answers its own names.** Two rules in avr's dnsmasq match `t-avr.avr.pt.ssle`:
+`-S /avr.pt.ssle/` (added by Incus because of `dns.domain`; a server with no address means "answer locally,
+never forward") and our `server=/ssle/10.10.0.1`. dnsmasq uses the **most specific (longest) matching
+domain**, and `avr.pt.ssle` (3 labels) beats `ssle` (1 label). This is the same idea as longest-prefix match
+in IP routing (`10.10.1.0/24` wins over `10.0.0.0/8`). It has nothing to do with `t-avr` being up: avr
+answers from its own records whether or not mgmt is reachable.
+
+**Why the first test alone proved nothing.** With mgmt up, both possible behaviours give the same answer:
+if avr answered locally it resolves, and if avr forwarded to mgmt, mgmt would ask avr back
+(`server=/avr.pt.ssle/10.10.1.1`) and it would still resolve. A test that passes either way can't tell them
+apart. Only with mgmt down do the two behaviours give different results, which is why the test was needed.
+
+**Limitation.** `10.10.0.1` is a single point of failure for everything except a site's own names:
+- Every instance on `ssle-mgmt` gets only `10.10.0.1` from DHCP, with no second resolver to fall back to.
+  That is why `t-mgmt` can't even resolve itself: its only DNS server is the one that is down.
+- Every lookup that crosses zones goes through it (mgmt → site and site → mgmt).
+- Consequence for monitoring: Wazuh agents in the sites find the manager by the name `siem-01.ssle`. An agent
+  that restarts or enrolls while the mgmt DNS is down can't find the SIEM, so its events stop arriving
+  exactly when something may be going wrong. Prometheus scrape targets given by name stop resolving too.
+- A failed lookup takes ~20 s to time out, so anything that resolves names on every request slows down
+  instead of failing fast. A DNS outage turns into a slowdown (a DoS side effect).
+
+**Mitigation.**
+- *Detection (not prevention):* monitor the DNS, e.g. a Prometheus probe that resolves a known name in each
+  zone and alerts when it fails. It doesn't stop the outage, but responders learn about it straight away
+  instead of from side effects.
+- *Prevention:* give the agents the manager's IP instead of its name (no DNS dependency; the cost is that
+  the IP must stay fixed, which a reserved DHCP address can guarantee), or run a second resolver for the
+  `ssle` zone so that dnsmasq has another `server=` line to fall back to.
