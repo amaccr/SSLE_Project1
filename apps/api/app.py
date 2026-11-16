@@ -9,11 +9,13 @@ Configuration comes from the environment (set by the build script):
   DB_HOST, DB_NAME, DB_USER, DB_PASSWORD, SECRET_KEY, LOG_FILE, SSLE_VULNERABLE
 """
 import functools
+import json
 import logging
 import os
 import socket
 import subprocess
 import time
+from datetime import datetime, timezone
 
 import psycopg2
 from flask import Flask, g, jsonify, request, session
@@ -33,13 +35,27 @@ app.secret_key = os.environ["SECRET_KEY"]
 app.wsgi_app = ProxyFix(app.wsgi_app, x_for=1)
 
 # --- Logs: what Wazuh reads -------------------------------------------------------------------------
-# One line per event, key=value, always with src= (an IP, never a name: see docs/naming.md).
+# One JSON object per line. json.dumps escapes quotes and newlines inside values, so user input can never
+# end a line early (a forged log line) or add a field of its own (a second "src"). Wazuh's built-in JSON
+# decoder reads the fields, so no custom decoder is needed.
+# The VALUES are still attacker-controlled (e.g. "user"): only "src" is trustworthy, and only because of
+# nginx + the firewall. Values are cut to MAX_FIELD characters so a huge username can't make a huge event.
+MAX_FIELD = 128
+HOST = socket.gethostname()
 logging.basicConfig(
     filename=os.environ.get("LOG_FILE", "/var/log/ssle/api.log"),
     level=logging.INFO,
-    format=f"%(asctime)s {socket.gethostname()} ssle-api: %(message)s",
+    format="%(message)s",
 )
 log = logging.getLogger("ssle-api")
+
+
+def log_event(event, **fields):
+    record = {"ts": datetime.now(timezone.utc).isoformat(timespec="milliseconds"),
+              "host": HOST, "app": "ssle-api", "event": event, "src": request.remote_addr}
+    record.update({k: str(v)[:MAX_FIELD] for k, v in fields.items()})
+    log.info(json.dumps(record))
+
 
 # --- Metrics: what Prometheus reads -----------------------------------------------------------------
 # Labels are low-cardinality on purpose: never a username or an IP. Every distinct label value is a new
@@ -110,12 +126,12 @@ def login():
     if row and check_password_hash(row[0], password):
         session["user"] = username
         LOGINS.labels("ok").inc()
-        log.info("login_ok user=%s src=%s", username, request.remote_addr)
+        log_event("login_ok", user=username)
         return jsonify(status="ok")
 
     result = "bad_password" if row else "no_user"
     LOGINS.labels(result).inc()
-    log.info("login_failed reason=%s user=%s src=%s", result, username, request.remote_addr)
+    log_event("login_failed", reason=result, user=username)
     # Same answer for both cases, so the attacker can't learn which usernames exist.
     return jsonify(error="invalid credentials"), 401
 
@@ -145,7 +161,7 @@ def add_reading():
     with db().cursor() as cur:
         cur.execute("INSERT INTO readings (sensor, value) VALUES (%s, %s)", (sensor, value))
     db().commit()
-    log.info("reading_added user=%s sensor=%s src=%s", session["user"], sensor, request.remote_addr)
+    log_event("reading_added", user=session["user"], sensor=sensor)
     return jsonify(status="ok"), 201
 
 
@@ -160,7 +176,7 @@ def report():
     if os.environ.get("SSLE_VULNERABLE") != "1":
         return jsonify(error="disabled"), 404
     sensor = request.args.get("sensor", "")
-    log.info("report user=%s sensor=%s src=%s", session["user"], sensor, request.remote_addr)
+    log_event("report", user=session["user"], sensor=sensor)
     out = subprocess.run(f"echo Report for sensor {sensor}; date -u",
                          shell=True, capture_output=True, text=True, timeout=5)
     return out.stdout, 200, {"Content-Type": "text/plain"}

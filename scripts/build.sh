@@ -15,9 +15,10 @@ IMAGE=images:ubuntu/22.04
 SITES_CONF=$REPO/config/sites.conf
 INSTANCES_CONF=$REPO/config/instances.conf
 
-# site_info <name>: prints "<region> <subnet prefix>" from sites.conf, fails if the site isn't listed.
+# site_info <name>: prints "<region> <subnet prefix> <lb public address>" from sites.conf,
+# fails if the site isn't listed.
 site_info() {
-    awk -v s="$1" '$1 == s { print $2, $3; found = 1 } END { exit !found }' "$SITES_CONF" \
+    awk -v s="$1" '$1 == s { print $2, $3, $4; found = 1 } END { exit !found }' "$SITES_CONF" \
         || { echo "unknown site: $1 (not in $SITES_CONF)" >&2; return 1; }
 }
 
@@ -201,14 +202,81 @@ UNIT
     echo "instance $i: api ready"
 }
 
+provision_lb() {
+    local p=$1 i=$2 site=$3 domain=$4 public=$5
+    [ "$public" != "-" ] || { echo "instance $i: site $site has no public address in sites.conf" >&2; return 1; }
+
+    # Second network card on inet with a fixed address (a public address shouldn't change on rebuild).
+    # Clients reach lb-01 on inet itself, without being forwarded by the VM. So the firewall can simply
+    # drop ALL forwarding from inet into the internal subnets (see docs/architecture.md, "lb-01 is dual-homed").
+    if ! incus config device get "$i" eth1 network --project "$p" > /dev/null 2>&1; then
+        incus config device add "$i" eth1 nic network=inet ipv4.address="$public" --project "$p" > /dev/null
+    fi
+    # eth1 only for the clients: no default route and no DNS from inet (those stay on the site network).
+    run_in "$p" "$i" sh -c 'umask 077; cat > /etc/netplan/20-inet.yaml' <<'NETPLAN'
+network:
+  version: 2
+  ethernets:
+    eth1:
+      dhcp4: true
+      dhcp4-overrides:
+        use-routes: false
+        use-dns: false
+NETPLAN
+    run_in "$p" "$i" netplan apply
+
+    run_in "$p" "$i" test -x /usr/sbin/nginx \
+        || { run_in "$p" "$i" apt-get -qq update; apt_install "$p" "$i" nginx; }
+
+    # Backends = every api instance of this site in instances.conf (adding api-0N = one line there).
+    # Limitation: nginx resolves these names when it (re)loads, so a rebuilt api with a new IP needs a
+    # reload; re-running this script does that.
+    local servers
+    servers=$(awk -v s="$site" -v d="$domain" '$1 == s && $3 == "api" { printf "    server %s.%s:5000;\n", $2, d }' \
+        "$INSTANCES_CONF")
+    run_in "$p" "$i" sh -c 'cat > /etc/nginx/sites-available/ssle' <<NGINX
+upstream ssle_api {
+$servers
+}
+
+server {
+    listen 80 default_server;
+    server_name _;
+    server_tokens off;                                  # don't advertise the nginx version
+
+    location / {
+        proxy_pass http://ssle_api;
+        proxy_set_header Host \$host;
+        # Overwrite, don't append: whatever X-Forwarded-For the client sends is thrown away, so the
+        # API (ProxyFix, one hop) always gets the address nginx actually saw.
+        proxy_set_header X-Forwarded-For \$remote_addr;
+    }
+}
+NGINX
+    run_in "$p" "$i" ln -sf /etc/nginx/sites-available/ssle /etc/nginx/sites-enabled/ssle
+    run_in "$p" "$i" rm -f /etc/nginx/sites-enabled/default
+    run_in "$p" "$i" nginx -tq
+    run_in "$p" "$i" systemctl reload nginx
+    echo "instance $i: lb ready on $public:80 ->$(echo "$servers" | awk '{ printf " %s", $2 }')"
+}
+
+provision_client() {
+    local p=$1 i=$2
+    run_in "$p" "$i" test -x /usr/bin/curl || { run_in "$p" "$i" apt-get -qq update; apt_install "$p" "$i" curl; }
+    echo "instance $i: client ready"
+}
+
 core() {
     ensure_network ssle-mgmt ipv4.address=$MGMT_DNS/24 ipv4.nat=true ipv6.address=none dns.domain=ssle
     ensure_network inet ipv4.address=192.168.100.1/24 ipv4.nat=true ipv6.address=none dns.domain=inet
+    # Outside actors live in the default project (they belong to no site).
+    ensure_instance default client-01 inet
+    provision_client default client-01
 }
 
 site() {
-    local name=$1 region prefix domain
-    read -r region prefix < <(site_info "$name") || exit 1
+    local name=$1 region prefix public domain
+    read -r region prefix public < <(site_info "$name") || exit 1
     domain=$name.$region.ssle
 
     ensure_network "ssle-$name" ipv4.address="$prefix.1/24" ipv4.nat=true ipv6.address=none dns.domain="$domain"
@@ -225,6 +293,7 @@ site() {
         case $role in
             db)  provision_db  "$name" "$inst" "$prefix.0/24" ;;
             api) provision_api "$name" "$inst" "$domain" ;;
+            lb)  provision_lb  "$name" "$inst" "$name" "$domain" "$public" ;;
             *)   echo "instance $inst: role '$role' not written yet, skipped" >&2 ;;
         esac
     done 3< <(awk -v s="$name" '$1 == s { print $2, $3, $4 }' "$INSTANCES_CONF")

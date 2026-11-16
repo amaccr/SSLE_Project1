@@ -59,6 +59,34 @@ could read the counters and check whether its activity is being counted. With `/
 is an easy rule to forget. 9200 was avoided because the Wazuh indexer on `siem-01` uses it.
 Limitation: `/metrics` is plain HTTP without authentication; it relies on the network rule alone.
 
+**lb-01 is dual-homed.** It has `eth0` on `ssle-avr` (default route, DNS, backends) and `eth1` on `inet` with a
+fixed address, `192.168.100.10` (from `config/sites.conf`; a public address shouldn't change on rebuild). nginx
+overwrites `X-Forwarded-For` with the address it saw, and the API trusts exactly one proxy hop.
+Tested from `client-01` (192.168.100.235), 16 Nov:
+
+| Request | Logged `src` |
+|---|---|
+| through lb-01, with a forged `X-Forwarded-For: 6.6.6.6` | 192.168.100.235 (forged header discarded) |
+| straight to api-01:5000, same forged header | **6.6.6.6** (the attacker chooses their own IP) |
+| straight to api-01:5000, no header | 192.168.100.235 |
+
+The last two rows show that the VM routes between its bridges **without NAT**, so today an outsider can skip
+lb-01 and reach the APIs directly, and then also fake their IP in the logs. Dual-homing alone does not prevent
+this; it makes the fix simple. Clients never need to be forwarded by the VM to reach lb-01, so the firewall
+rule is "drop all forwarding from `inet` into the internal subnets", with no exceptions. (If lb-01 were only on
+`ssle-avr`, the rule would need an exception for its DHCP address on port 80.)
+
+**App logs are JSON, one object per line.** The first version wrote `key=value` lines with the username raw,
+which allowed **log injection**: a username containing a newline could write a whole fake line (e.g. many
+`login_failed` lines with a legitimate client's IP, so Wazuh's active response would block an innocent user,
+which is a DoS without a flood), and `x src=8.8.8.8` gave a line with two `src` fields. Now each event is written
+with `json.dumps`, which escapes quotes and newlines inside values, and Wazuh's built-in JSON decoder reads it.
+Values are cut to 128 characters. Tested 16 Nov through lb-01: a forged `login_ok` line, a second `src` and a
+1000-character username all stayed inside the `user` value; every line parsed as JSON with the real `src`.
+Limitation: JSON stops user input from changing the **structure** of an event, not its **content**. Values like
+`user` are still attacker-controlled (rules must not trust them, and the dashboard must display them safely).
+Only `src` is trustworthy, and only because of nginx + the firewall.
+
 **DNS delegation with dnsmasq forwarding, only where needed.** Each Incus network's DNS only knows its own
 `dns.domain`. One `raw.dnsmasq` line per delegated zone fixes that, e.g. on `ssle-mgmt`:
 `server=/avr.pt.ssle/10.10.1.1` (same for `lis`). The org's DNS doesn't know site names, it knows who to ask.
