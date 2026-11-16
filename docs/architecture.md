@@ -256,3 +256,27 @@ Tested 16 Nov: both APIs `up` with `site="avr"`; after 3 failed + 1 good login t
 prom-01 → db-01:5432 both blocked.
 Limitation: counters live in the gunicorn processes and restart from 0 when the API restarts, so alerts must use
 `rate()`/`increase()` (which handle resets), never raw counter values.
+
+## SIEM: siem-01.ssle
+
+Wazuh 4.14 all-in-one (Guide 4's installer, `wazuh-install.sh -a -i`) on `10.10.0.20`. Agents on every avr instance and
+on prom-01, named by their full DNS name (short names repeat across sites) and pinned to the manager's version.
+
+Keeping Wazuh from hurting the VM:
+- **Disk:** siem-01 lives on the Incus storage pool `wazuh`, on a second VM disk mounted at `/mnt/wazuh`
+  (`LABEL=ssle-wazuh`, `nofail` in `/etc/fstab`). The pool uses the subfolder `incus/`, which exists only on that
+  disk, so if the disk isn't mounted the pool fails instead of writing to the root disk. If Wazuh fills its disk,
+  Wazuh stops and the VM keeps running. The root disk had 8.2 GB free, and the VM's swap partition sits right after
+  root, so growing the root partition would have meant repartitioning.
+- **Memory:** `limits.memory=5GiB` for the container, indexer heap 2 GB (by default it takes half of the RAM it
+  can see, which inside a container is the whole VM's).
+- **Vulnerability detection off:** it kept a local CVE database of ~10 GB (refreshed hourly) and none of the three
+  threats uses it. Disk use went from 16 GB to 4 GB. Limitation: a real deployment would keep it, since unpatched
+  packages are a classic APT entry point.
+- **Retention:** an ISM policy (`ssle-retention`) deletes daily alerts/archives/monitoring/statistics indices after
+  14 days. 14, not 7, so the first attack tests survive until the report and demo. In production the number comes
+  from policy or law (often 90+ days).
+- Firewall `acl-mgmt-siem`: 1514/1515 only from lab instances, dashboard (443) only from the VM.
+
+Limitation: agent enrollment (1515) has no password, so anything that can reach 1515 could enroll a fake agent;
+only the firewall limits who can.
