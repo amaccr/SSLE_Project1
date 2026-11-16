@@ -11,6 +11,7 @@ PROM_IP=10.10.0.10          # prom-01.ssle
 SIEM_IP=10.10.0.20          # siem-01.ssle
 INET_SUBNET=192.168.100.0/24
 CLIENT_IP=192.168.100.20    # client-01.inet
+ATTACKER_IP=192.168.100.66  # attacker-01.inet (outside adversary; load/flood source for the DoS threat)
 WAZUH_VERSION=4.14          # same installer line as Guide 4
 WAZUH_DISK=/mnt/wazuh       # second VM disk (LABEL=ssle-wazuh in /etc/fstab): Wazuh can only fill this disk
 
@@ -291,6 +292,34 @@ NGINX
     echo "instance $i: lb ready on $public:80 ->$(echo "$servers" | awk '{ printf " %s", $2 }')"
 }
 
+# --- Per-host exporter on the VM (h01): "observed, not declared" (docs/architecture.md) --------------
+# Runs on the VM, not in a container, because only the VM can query Incus about every container. Reuses
+# Guide 3's exporter (apps/host-exporter). Installing a systemd unit needs root, so THIS function is the
+# only place build.sh uses sudo (one prompt); the rest must run as the normal incus user, never under
+# sudo (root's incus wouldn't see the user's instances). The service itself runs as the invoking user,
+# who has incus access through the incus group. Single listener for now; lis would add 10.10.2.1:9101.
+provision_host_exporter() {
+    local user; user=$(id -un)
+    sudo install -D -m 755 "$REPO/apps/host-exporter/host_exporter.py" /opt/ssle-host-exporter/host_exporter.py
+    sudo tee /etc/systemd/system/ssle-host-exporter.service > /dev/null <<UNIT
+[Unit]
+Description=SSLE per-host Incus metrics exporter
+After=incus.service network-online.target
+
+[Service]
+User=$user
+ExecStart=/usr/bin/python3 /opt/ssle-host-exporter/host_exporter.py --listen $MGMT_DNS --port 9101
+Restart=on-failure
+
+[Install]
+WantedBy=multi-user.target
+UNIT
+    sudo systemctl daemon-reload
+    sudo systemctl enable --now ssle-host-exporter > /dev/null 2>&1
+    sudo systemctl restart ssle-host-exporter          # pick up new code on a re-run
+    echo "host exporter: serving on $MGMT_DNS:9101"
+}
+
 # --- Monitoring: prom-01.ssle (central Prometheus, Guide 3's pull model) -------------------------------
 provision_prom() {
     local p=$1 i=$2
@@ -307,6 +336,12 @@ scrape_configs:
   - job_name: prometheus
     static_configs:
       - targets: ['localhost:9090']
+
+  # Per-host exporter on the VM (CPU/mem/net of every container, read from Incus). One listener for now;
+  # a second site (lis) would add 10.10.2.1:9101. Each sample carries its own container/project labels.
+  - job_name: host
+    static_configs:
+      - targets: ['10.10.0.1:9101']
 
   # App /metrics (port 9102) of sites scraped directly. Each site writes its own file
   # (targets/app-<site>.json) when it is built: Prometheus re-reads these files without a restart.
@@ -540,6 +575,17 @@ provision_client() {
     echo "instance $i: client ready"
 }
 
+# The adversary: curl for probing, plus the load tool used to generate the DoS flood against lb-01.
+# (Load tool chosen in the DoS threat section; added here once decided.)
+provision_attacker() {
+    local p=$1 i=$2
+    run_in "$p" "$i" test -x /usr/bin/curl \
+        || { run_in "$p" "$i" apt-get -qq update; apt_install "$p" "$i" curl; }
+    # ab (apache2-utils): generates the DoS load and reports throughput + latency percentiles.
+    run_in "$p" "$i" test -x /usr/bin/ab || apt_install "$p" "$i" apache2-utils
+    echo "instance $i: attacker ready"
+}
+
 # --- Firewall: Incus network ACLs, deny by default --------------------------------------------------
 # One ACL per role and site (acl-<site>-<role>), attached to the instances' network cards. Anything not
 # allowed here is dropped (incoming) or rejected (outgoing), and logged: a blocked attempt is itself a
@@ -629,11 +675,16 @@ core() {
     # Outside actors live in the default project (they belong to no site).
     ensure_instance default client-01 inet "$CLIENT_IP"
     provision_client default client-01
+    # Outside adversary, same base image as the legitimate client (only curl); the DoS load tool is
+    # installed by provision_attacker (see docs/architecture.md, the DoS threat section).
+    ensure_instance default attacker-01 inet "$ATTACKER_IP"
+    provision_attacker default attacker-01
 
     ensure_wazuh_pool
     ensure_instance default siem-01 ssle-mgmt "$SIEM_IP" "" wazuh
     provision_siem default siem-01
 
+    provision_host_exporter          # on the VM itself; must be up before prom scrapes :9101
     ensure_instance default prom-01 ssle-mgmt "$PROM_IP"
     provision_prom default prom-01
     ensure_agent default prom-01 prom-01.ssle
@@ -684,5 +735,6 @@ case "${1:-}" in
     core) core ;;
     site) [ -n "${2:-}" ] || { echo "usage: $0 site <name>" >&2; exit 1; }
           site "$2" ;;
-    *)    echo "usage: $0 core | site <name>" >&2; exit 1 ;;
+    host-exporter) provision_host_exporter ;;   # just the VM exporter (prompts once for sudo)
+    *)    echo "usage: $0 core | site <name> | host-exporter" >&2; exit 1 ;;
 esac
