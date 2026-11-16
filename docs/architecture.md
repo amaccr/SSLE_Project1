@@ -50,6 +50,15 @@ container can talk to a process on the host. A firewall rule allows only `prom-0
 This covers resource metrics only (CPU, memory, network). Request counts and login failures are only known by the
 apps, so the apps also expose their own `/metrics`. The two answer different questions.
 
+**App on 5000, app metrics on a separate port (9102).** `lb-01` proxies only to port 5000 on the apps.
+The `/metrics` endpoint runs on its own port (`prometheus_client.start_http_server(9102)`) that nginx never
+routes to, so from `inet` it doesn't exist. A firewall rule then allows only Prometheus to reach 9102.
+Both layers are needed: without the firewall, anything inside the site (e.g. an APT foothold on `api-01`)
+could read the counters and check whether its activity is being counted. With `/metrics` on the app port,
+`http://lb-01/metrics` would show the login-failure counters to everyone unless nginx blocked that path, which
+is an easy rule to forget. 9200 was avoided because the Wazuh indexer on `siem-01` uses it.
+Limitation: `/metrics` is plain HTTP without authentication; it relies on the network rule alone.
+
 **DNS delegation with dnsmasq forwarding, only where needed.** Each Incus network's DNS only knows its own
 `dns.domain`. One `raw.dnsmasq` line per delegated zone fixes that, e.g. on `ssle-mgmt`:
 `server=/avr.pt.ssle/10.10.1.1` (same for `lis`). The org's DNS doesn't know site names, it knows who to ask.
@@ -100,10 +109,10 @@ These cross from `ssle-mgmt` into the site networks through the VM. Each row bec
 | every instance with a Wazuh agent (avr + lis) | siem-01.ssle | 1514/tcp | agent → manager events |
 | every instance with a Wazuh agent (avr + lis) | siem-01.ssle | 1515/tcp | agent enrollment |
 | prom-01.ssle | h01.ssle (10.10.0.1) | 9101/tcp | scrape the host exporter |
-| prom-01.ssle | avr app `/metrics` | TBD | app metrics (requests, logins), scraped directly |
+| prom-01.ssle | avr app `/metrics` | 9102/tcp | app metrics (requests, logins), scraped directly |
 | prom-01.ssle | prom-01.lis.pt.ssle | 9090/tcp (`/federate`) | federation |
 | prom-01.lis.pt.ssle (its IP only) | h01.ssle (10.10.2.1) | 9101/tcp | scrape lis container metrics |
-| prom-01.lis.pt.ssle | lis app `/metrics` | TBD | app metrics (requests, logins) |
+| prom-01.lis.pt.ssle | lis app `/metrics` | 9102/tcp | app metrics (requests, logins) |
 | ssle-mgmt DNS (10.10.0.1) | site DNS (10.10.1.1, 10.10.2.1) | 53 | delegated zones `avr.pt.ssle`, `lis.pt.ssle` |
 | site DNS (10.10.1.1, 10.10.2.1) | ssle-mgmt DNS (10.10.0.1) | 53 | zone `ssle` (agents find siem-01) |
 | admin (VM) | siem-01.ssle | 443/tcp | Wazuh dashboard |
