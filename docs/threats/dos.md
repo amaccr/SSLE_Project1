@@ -88,9 +88,26 @@ matplotlib plots rendered from Prometheus's range API (for the report figures).
   `python3 scripts/plot_metrics.py --start '<t0>' --end '<t1>' --label after`
 - `client-baseline.png` — ab baseline table (before, client-side)
 
-## Detection (to build)
-- Prometheus **alert rule**: fire when request rate (or p95 latency) crosses a threshold.
-- Wazuh **rule** on `lb-01` nginx access.log: many requests/sec from one IP.
+## Detection
+- Wazuh (DONE): nginx lines decode as `web-accesslog` (srcip, id=status, url). Built-in rule 31101
+  = "web 4xx"; 429 = a rate-limit trip. Custom rules (wazuh/local_rules.xml, on the manager):
+  - 100100 (level 3): one HTTP 429 from srcip (narrows 31101 to status 429).
+  - 100101 (level 12): >=30 x 100100 from the SAME source IP in 60s = DoS confirmed.
+  Verified with wazuh-logtest (30 x level-3 then level-12) and live (100101 fired on the burst).
+  Note: the built-in rule 31151 ("multiple 4xx from same IP", 14/90s) ALSO fires, but its threshold
+  is low (legit retries could trip it); 100101 is DoS-specific and higher-confidence for auto-block.
+- Prometheus alert rule (STILL TO BUILD): fire on sum(rate(requests)) or CPU over a threshold -- the
+  aggregate "are we saturated?" signal, complementing Wazuh's per-IP "who".
+
+## Response (active)
+- Wazuh active response (DONE): firewall-drop, location=local, rules_id=100101, timeout=600
+  (wazuh/active-response.conf, applied in siem-01 /var/ossec/etc/ossec.conf; NOTE the stock file wraps
+  the example in <!-- -->, so the block must be UNCOMMENTED). Needs iptables on the agent (installed
+  on lb-01). On trigger, lb-01 adds `iptables -I INPUT/FORWARD -s <srcip> -j DROP` for 600s, then
+  auto-removes. Verified 2026-11-17: attacker (.66) blocked (curl 000), client-01 unaffected (200),
+  built-in rule 651 "Host Blocked by firewall-drop" confirms. Duplicate triggers abort safely.
+  Limitation: per-IP block, like the rate limit, is evaded by a distributed botnet (threat 2). A
+  volumetric flood also drops Wazuh agent events (buffer) -> detection can lag the attack.
 
 ## Response
 - nginx `limit_req` (DONE): `limit_req_zone $binary_remote_addr zone=perip:10m rate=10r/s;`

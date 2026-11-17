@@ -1,0 +1,23 @@
+<!-- SSLE custom rules. Pushed to /var/ossec/etc/rules/local_rules.xml on siem-01 (the manager). -->
+<group name="web,attack,dos,">
+
+  <!-- A single nginx HTTP 429 = one rate-limit trip. nginx returns 429 only when a client exceeds
+       the per-IP limit, so a 429 is already a strong "this source is abusive" signal. 31101 is the
+       built-in "web 4xx" rule; this narrows it to status 429 so we count only rate-limit trips. -->
+  <rule id="100100" level="3">
+    <if_sid>31101</if_sid>
+    <id>^429$</id>
+    <description>nginx rate limit tripped (HTTP 429) from $(srcip)</description>
+    <group>dos,</group>
+  </rule>
+
+  <!-- DoS confirmed: >=30 rate-limit trips (429) from the SAME source IP within 60s. Level 12 drives
+       the firewall-drop active response (timed block). Threshold well above any legitimate client. -->
+  <rule id="100101" level="12" frequency="30" timeframe="60">
+    <if_matched_sid>100100</if_matched_sid>
+    <same_source_ip />
+    <description>DoS: source IP $(srcip) hit the nginx rate limit >=30 times in 60s (HTTP 429 flood)</description>
+    <group>dos,attack,pci_dss_6.5.9,</group>
+  </rule>
+
+</group>

@@ -259,6 +259,8 @@ NETPLAN
 
     run_in "$p" "$i" test -x /usr/sbin/nginx \
         || { run_in "$p" "$i" apt-get -qq update; apt_install "$p" "$i" nginx; }
+    # iptables: the Wazuh firewall-drop active response (DoS threat) adds DROP rules here.
+    run_in "$p" "$i" test -x /usr/sbin/iptables || apt_install "$p" "$i" iptables
 
     # Backends = every api instance of this site in instances.conf (adding api-0N = one line there).
     # Limitation: nginx resolves these names when it (re)loads, so a rebuilt api with a new IP needs a
@@ -506,7 +508,43 @@ provision_siem() {
         echo "secrets mgmt: dashboard password saved in $secrets"
     fi
     ensure_index_retention "$p" "$i" "$secrets"
+    ensure_wazuh_dos "$p" "$i"
     echo "instance $i: wazuh ready (dashboard https://$SIEM_IP from the VM, user admin)"
+}
+
+# ensure_wazuh_dos <project> <instance>: DoS detection rules + firewall-drop active response.
+# Custom rules (wazuh/local_rules.xml): 100100 = one HTTP 429, 100101 = >=30 from one IP in 60s.
+# Active response: firewall-drop on the reporting agent (lb-01) for 600s. The stock ossec.conf wraps
+# the active-response example in <!-- -->, so this uncomments our block (or inserts it if absent).
+ensure_wazuh_dos() {
+    local p=$1 i=$2
+    incus file push "$REPO/wazuh/local_rules.xml" "$i/var/ossec/etc/rules/local_rules.xml" --project "$p"
+    run_in "$p" "$i" chown wazuh:wazuh /var/ossec/etc/rules/local_rules.xml
+    run_in "$p" "$i" python3 - <<'PY'
+import re
+p = "/var/ossec/etc/ossec.conf"
+s = open(p).read()
+block = """  <active-response>
+    <command>firewall-drop</command>
+    <location>local</location>
+    <rules_id>100101</rules_id>
+    <timeout>600</timeout>
+  </active-response>"""
+orig = s
+# uncomment our block if the stock file wraps it in a comment
+s = re.sub(r"<!--\s*(<active-response>\s*<command>firewall-drop</command>.*?<rules_id>100101</rules_id>.*?</active-response>)\s*-->",
+           r"\1", s, flags=re.DOTALL)
+# insert before </ossec_config> if still absent
+if "<rules_id>100101</rules_id>" not in s:
+    s = s.replace("</ossec_config>", block + "\n\n</ossec_config>", 1)
+if s != orig:
+    open(p, "w").write(s)
+    print("ossec.conf: firewall-drop active response enabled")
+else:
+    print("ossec.conf: active response already present")
+PY
+    run_in "$p" "$i" systemctl restart wazuh-manager
+    echo "wazuh: DoS rules (100100/100101) + firewall-drop active response applied"
 }
 
 # ensure_index_retention <project> <instance> <secrets file>
