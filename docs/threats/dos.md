@@ -87,6 +87,10 @@ matplotlib plots rendered from Prometheus's range API (for the report figures).
   bad_password ~57/s, CPU ~1.6 cores/API). Regenerate for "after" with:
   `python3 scripts/plot_metrics.py --start '<t0>' --end '<t1>' --label after`
 - `client-baseline.png` — ab baseline table (before, client-side)
+- `ui/prometheus_alerts.png` — Prometheus /classic/alerts, both DoS rules loaded
+- `ui/wazuh_threat-hunting.png` — Wazuh Threat Hunting, the 100101+651 events over the test window
+- `ui/wazuh_dos-detection-and-block.png` — Wazuh table: rule 100101 (level 12, DoS detected, srcip
+  192.168.100.66) and rule 651 (Host Blocked by firewall-drop) together on lb-01 = detection + response
 
 ## Detection
 - Wazuh (DONE): nginx lines decode as `web-accesslog` (srcip, id=status, url). Built-in rule 31101
