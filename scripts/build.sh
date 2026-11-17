@@ -267,6 +267,13 @@ NETPLAN
     servers=$(awk -v s="$site" -v d="$domain" '$1 == s && $3 == "api" { printf "    server %s.%s:5000;\n", $2, d }' \
         "$INSTANCES_CONF")
     run_in "$p" "$i" sh -c 'cat > /etc/nginx/sites-available/ssle' <<NGINX
+# DoS defence (threat 1): one request-rate counter per client IP. nginx sees the real client IP
+# (X-Forwarded-For is overwritten below), so this throttles the actual attacker. 10 MB ~= 160k IPs.
+# Limitation: per-IP limiting is defeated by a distributed botnet (each IP stays under the cap) -> that
+# is threat 2's problem and needs an aggregate defence.
+limit_req_zone \$binary_remote_addr zone=perip:10m rate=10r/s;
+limit_req_status 429;                                   # over-limit -> 429 Too Many Requests (not 503)
+
 upstream ssle_api {
 $servers
 }
@@ -277,6 +284,9 @@ server {
     server_tokens off;                                  # don't advertise the nginx version
 
     location / {
+        # Absorb a burst of 20, then reject excess immediately (nodelay) with 429. This caps the flood
+        # at the edge so it never reaches the APIs' expensive hash path.
+        limit_req zone=perip burst=20 nodelay;
         proxy_pass http://ssle_api;
         proxy_set_header Host \$host;
         # Overwrite, don't append: whatever X-Forwarded-For the client sends is thrown away, so the

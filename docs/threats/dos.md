@@ -92,16 +92,31 @@ matplotlib plots rendered from Prometheus's range API (for the report figures).
 - Prometheus **alert rule**: fire when request rate (or p95 latency) crosses a threshold.
 - Wazuh **rule** on `lb-01` nginx access.log: many requests/sec from one IP.
 
-## Response (to build)
-- nginx `limit_req`: rate-limit per client IP at the load balancer.
-- Wazuh **active response**: block the offending IP (firewall-drop) on the alert.
+## Response
+- nginx `limit_req` (DONE): `limit_req_zone $binary_remote_addr zone=perip:10m rate=10r/s;`
+  + `limit_req zone=perip burst=20 nodelay;` + `limit_req_status 429;` in provision_lb.
+  Result: capped the flood from ~56 req/s to ~10 req/s reaching the APIs; API CPU 3.07 -> 0.54
+  cores; p95 latency 0.24 -> 0.074 s. Over-limit requests get 429 instantly (cheap), so the
+  expensive hash path is shielded. A single-source flood is effectively neutralised.
+  Finding: once rate-limited, ab at c=50 generated ~12,000 req/s of 429s (nginx shrugged it off,
+  only ~10/s reached the APIs) -> nginx is far more resilient than the hash path, but that volume
+  floods the logs. For the sustained "after" capture the attacker was throttled to ~80 req/s.
+- Wazuh **active response** (TO BUILD): block the offending IP (firewall-drop) on the alert.
+
+## Limitation found: the monitoring pipeline has its own DoS ceiling
+During the 12k req/s burst the lb-01 Wazuh AGENT hit its client_buffer limit and logged
+"Agent buffer is full: Events may be lost" (recovered ~10 s later). The agent self-throttles to
+protect the manager, so under a volumetric flood the SIEM DROPS events exactly when the attack is
+loudest. Consequence: don't rely on per-event SIEM alerting alone for volumetric DoS -- the
+aggregate signal (Prometheus request-rate/CPU) and the edge defence (nginx) are more reliable.
+Mitigation: tune the agent buffer / events-per-second, or detect the flood by rate at nginx.
 
 ## Metrics — before / during / after
 | Phase | req/s (Prom) | p95 login latency (server) | API CPU (cores) | ab client view |
 |---|---|---|---|---|
 | before | ~0 | ~0.08 s | ~0 | 15 req/s @ c=1, 68 ms |
 | during (c=50, 3 min) | ~54 (26.6+26.2) | 0.24 s | ~3.07 (1.53+1.54) | 54 req/s, mean 923 ms, p95 1524 ms, 0 failed |
-| after (defended) | TODO | TODO | TODO | TODO |
+| after (nginx limit_req) | ~10 (capped) | 0.074 s | ~0.54 (0.27+0.27) | ~10/s reach API; nginx 1520 through (401) / 4397 blocked (429) |
 
 Two report points from the "during" run:
 - Service DEGRADED, not crashed: 0 failed requests but latency 68 ms -> ~920 ms (13x). A heavier
