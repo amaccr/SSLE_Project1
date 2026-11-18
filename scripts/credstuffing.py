@@ -24,6 +24,7 @@ whole point is that stuffing works fine while staying quiet. Default 60/min = 1/
 import argparse
 import json
 import random
+import sys
 import time
 import urllib.error
 import urllib.request
@@ -82,7 +83,22 @@ def main():
     p.add_argument("--shuffle", action="store_true", help="randomise the order each pass")
     p.add_argument("--brute-user", metavar="USER",
                    help="VERTICAL mode: try PASSWORDS against this ONE account (to trip the lockout)")
+    p.add_argument("--slice", metavar="I/N",
+                   help="BOTNET mode: spray only chunk I of N of the dump (1-based), so each source stays"
+                        " under the per-source thresholds while the aggregate signal is unchanged")
     args = p.parse_args()
+    sys.stdout.reconfigure(line_buffering=True)  # flush each line even when stdout is redirected to a file
+                                                 # (so a `timeout` SIGTERM can't lose a small buffered log)
+
+    # Botnet: each bot sprays a disjoint, contiguous chunk of the dump. Splitting the distinct usernames
+    # across sources keeps every single source below the Wazuh per-src correlation (>=8 distinct users in
+    # 60s) and any per-IP rate limit, yet the aggregate no_user rate (summed over all bots) still trips
+    # the Prometheus alert -- which is exactly why the response is lockout + aggregate alert, not a block.
+    global CREDENTIALS
+    if args.slice:
+        i, n = (int(x) for x in args.slice.split("/"))
+        CREDENTIALS = [c for j, c in enumerate(CREDENTIALS) if j % n == (i - 1)]
+        print(f"botnet slice {i}/{n}: {len(CREDENTIALS)} of the dump")
 
     interval = 60.0 / args.rate
     if args.brute_user:

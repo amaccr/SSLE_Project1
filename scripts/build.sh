@@ -810,6 +810,16 @@ core() {
     # installed by provision_attacker (see docs/architecture.md, the DoS threat section).
     ensure_instance default attacker-01 inet "$ATTACKER_IP"
     provision_attacker default attacker-01
+    # Botnet nodes for the credential-stuffing threat (threat 2): extra outside sources so the spray can
+    # be DISTRIBUTED. Each stays under every per-source control (the nginx rate limit, the Wazuh per-src
+    # correlation 100111, a firewall-drop block) while the AGGREGATE no_user rate still trips the
+    # Prometheus alert -- which is exactly why the response is account lockout + aggregate alert, not a
+    # per-IP block. .67/.68 continue the attacker range after attacker-01 (.66).
+    local bot
+    for bot in 02:67 03:68; do
+        ensure_instance default "attacker-${bot%%:*}" inet "192.168.100.${bot##*:}"
+        provision_attacker default "attacker-${bot%%:*}"
+    done
 
     ensure_wazuh_pool
     ensure_instance default siem-01 ssle-mgmt "$SIEM_IP" "" wazuh

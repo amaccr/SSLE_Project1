@@ -70,12 +70,33 @@ Tries a password list against ONE real account. This is the attack the per-accou
 lockout is built to stop (see Response). Verified: 15 guesses, all 401; `alice` locked
 after 5.
 
-### A botnet would evade per-source defences (to demonstrate next)
-A distributed variant spreads the same spray over several source IPs. Each IP then stays
-under every per-source threshold (the nginx rate limit, the Wazuh per-`src` correlation,
-and a firewall-drop block), while the **aggregate** `no_user` signal is unchanged. That
-is exactly why the response is account lockout + an aggregate alert rather than a per-IP
-block. (Planned: extra inet source addresses; TODO.)
+### The botnet variant — per-source defences are evaded, the aggregate survives (measured 2026-11-18)
+A distributed run spreads the same dump over three source IPs: `attacker-01/02/03`
+(192.168.100.66/67/68, added to `build.sh core`). Each bot sprays a disjoint chunk
+(`credstuffing.py --slice I/3`) paced at 5/min, so within any 60 s window a single source
+touches < 8 distinct usernames — just under the Wazuh correlation threshold.
+
+Result (3 bots, 180 s):
+
+| signal | single source (earlier) | distributed (3 bots) |
+|---|---|---|
+| Wazuh `100110` (one failed login) | fired per event | **+43 events** (the failures still arrive and are logged) |
+| Wazuh `100111` (≥8 distinct users/60 s from one `src`) | fired **25×** | **0** — never fires for any bot |
+| Prometheus `CredentialStuffingUnknownUsers` (aggregate `no_user`) | fired | **fired** (18.7/min, `images/credstuffing/ui/botnet_prometheus_alerts.png`) |
+| takeover of bob | yes (from .66) | yes (from **.67**) |
+
+So splitting the spray across sources **blinds every per-source control** — the Wazuh
+per-`src` correlation, the nginx per-IP rate limit (no 429s), and, by extension, a
+firewall-drop block (it would have to chase three IPs, then thirty, then three thousand) —
+while the **aggregate** `no_user` rate is unchanged and still trips the Prometheus alert.
+That is the whole argument for the response being account lockout + an aggregate alert
+rather than a per-IP block. Figure: `images/credstuffing/plots/bad-logins_botnet.png`.
+
+Per-source event counts over the run confirm the evasion: 14 / 13 / 14 distinct usernames
+each across the full ~3 min, but never 8 inside one 60 s window. Scaling note: the Wazuh
+rule could be tightened (lower the frequency, or correlate on `dstuser` across sources),
+but a large enough botnet always drives the per-source rate toward zero — only an
+aggregate or per-account view is robust to distribution.
 
 ## Detection
 Two independent layers, both verified firing live.
@@ -198,6 +219,7 @@ fired on both layers and survived load-balancing; lockout provably stops the ver
 and blocks even a correct password while locked. What the limits are: the spray itself has
 no safe automated block, the bob takeover is stopped by neither control (→ MFA/password
 policy), per-account lockout is itself a DoS vector, and per-IP controls fall to a botnet
-(to be shown). Links to threat 1 (the slow hash is both a DoS cost and, once a lock is set,
+(demonstrated: 3 bots fired the aggregate Prometheus alert while the Wazuh per-source
+correlation never triggered — 0 vs 25 from a single source). Links to threat 1 (the slow hash is both a DoS cost and, once a lock is set,
 a cost the lock avoids) and to the APT threat (a stolen valid credential like bob's is a
 quiet foothold, not a flood).
