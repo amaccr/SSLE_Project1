@@ -132,7 +132,9 @@ JSON log `/var/log/ssle/api.log` via the built-in JSON decoder:
 Live run: 183 × 100110, split almost evenly **api-01: 91 / api-02: 92** (nginx round-robins
 the logins), and 25 × 100111, all `src=192.168.100.66`. Key point: the correlation runs at
 the MANAGER keyed on `src`, so splitting the logs across two API agents does **not** blind
-it — load-balancing is transparent to the detection.
+it — load-balancing is transparent to the detection. Dashboard evidence:
+`images/credstuffing/ui/wazuh_credstuffing.png` (Discover, `rule.id:100111` — the hits, every
+one `data.src=192.168.100.66` with a different `data.dstuser`: the distinct-username signature).
 
 Why `rate()`/per-min and not raw counters: the app counters restart from 0 when gunicorn
 restarts (docs/architecture.md, prom-01 limitation).
