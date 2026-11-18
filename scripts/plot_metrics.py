@@ -28,7 +28,7 @@ BLUE, ORANGE, VERMILLION, GREEN, GREY = "#0072B2", "#E69F00", "#D55E00", "#009E7
 # Fixed colour per entity, so the graphs line up and colour follows the entity (not its rank).
 COLOURS = {"api-01.avr.pt.ssle": BLUE, "api-02.avr.pt.ssle": ORANGE,
            "api-01": BLUE, "api-02": ORANGE,
-           "bad_password": VERMILLION, "ok": GREEN, "no_user": GREY}
+           "bad_password": VERMILLION, "ok": GREEN, "no_user": GREY, "locked": BLUE}
 
 # One entry per graph: filename stem, title, y-axis label, query, and which label picks the series.
 PANELS = [
