@@ -15,7 +15,7 @@ import os
 import socket
 import subprocess
 import time
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 
 import psycopg2
 from flask import Flask, g, jsonify, request, session
@@ -63,7 +63,15 @@ def log_event(event, **fields):
 # Per-IP / per-user detail belongs in the logs (Wazuh), counts belong here.
 REQUESTS = Counter("ssle_http_requests_total", "HTTP requests", ["endpoint", "method", "status"])
 LATENCY = Histogram("ssle_http_request_seconds", "Request duration", ["endpoint"])
-LOGINS = Counter("ssle_login_attempts_total", "Login attempts", ["result"])  # ok | bad_password | no_user
+LOGINS = Counter("ssle_login_attempts_total", "Login attempts", ["result"])  # ok|bad_password|no_user|locked
+
+# Credential-stuffing response (threat 2): lock an account after too many consecutive failed logins.
+# Defends a TARGETED brute-force of one account. It does NOT stop the horizontal spray (each username is
+# tried once, so no account reaches the threshold) nor a takeover with a correct reused password (no
+# failure at all) -- those are caught by the aggregate no_user alert and by password strength/MFA. That
+# split is the point: no single control is sufficient (see docs/threats/credstuffing.md).
+LOCKOUT_THRESHOLD = 5     # consecutive failures on an existing account before it locks
+LOCKOUT_MINUTES = 15      # how long it stays locked
 
 
 @app.before_request
@@ -117,22 +125,65 @@ def health():
 def login():
     data = request.get_json(silent=True) or {}
     username, password = str(data.get("username", "")), str(data.get("password", ""))
-    with db().cursor() as cur:
-        cur.execute("SELECT password_hash FROM users WHERE username = %s", (username,))  # parameterised
+    conn = db()
+    with conn.cursor() as cur:
+        cur.execute(
+            "SELECT u.password_hash, s.failed_count, s.locked_until "
+            "FROM users u LEFT JOIN login_state s USING (username) WHERE u.username = %s",  # parameterised
+            (username,),
+        )
         row = cur.fetchone()
 
-    # Note: the hash check is deliberately slow (that's what stops offline cracking), so every login
-    # costs CPU on the API. Credential stuffing therefore also loads the API: threats 1 and 2 overlap.
-    if row and check_password_hash(row[0], password):
+    # Unknown user: nothing to lock, and we never create lock state for a name that is not in users
+    # (the FK would reject it anyway), so a spray of random usernames can't grow login_state.
+    if row is None:
+        LOGINS.labels("no_user").inc()
+        log_event("login_failed", reason="no_user", user=username)
+        return jsonify(error="invalid credentials"), 401
+
+    password_hash, failed_count, locked_until = row
+    now = datetime.now(timezone.utc)
+
+    # Locked: reject BEFORE checking the password, so even a correct password (a successful stuffing hit)
+    # cannot take over a locked account -- and we skip the deliberately slow pbkdf2 hash (threat-1 link:
+    # a locked account stops costing CPU). Same generic 401 as any failure, so the lock is not revealed.
+    if locked_until and locked_until > now:
+        LOGINS.labels("locked").inc()
+        log_event("login_failed", reason="locked", user=username)
+        return jsonify(error="invalid credentials"), 401
+
+    if check_password_hash(password_hash, password):
+        with conn.cursor() as cur:                      # success: clear any failure/lock state
+            cur.execute("DELETE FROM login_state WHERE username = %s", (username,))
+        conn.commit()
         session["user"] = username
         LOGINS.labels("ok").inc()
         log_event("login_ok", user=username)
         return jsonify(status="ok")
 
-    result = "bad_password" if row else "no_user"
-    LOGINS.labels(result).inc()
-    log_event("login_failed", reason=result, user=username)
-    # Same answer for both cases, so the attacker can't learn which usernames exist.
+    # Wrong password on an existing account: count it. An expired lock (locked_until <= now) is cleared
+    # first so the counter starts fresh instead of re-locking on the first new failure.
+    with conn.cursor() as cur:
+        if locked_until and locked_until <= now:
+            cur.execute("DELETE FROM login_state WHERE username = %s", (username,))
+        cur.execute(
+            "INSERT INTO login_state (username, failed_count, last_failed_at) VALUES (%s, 1, %s) "
+            "ON CONFLICT (username) DO UPDATE SET failed_count = login_state.failed_count + 1, "
+            "last_failed_at = EXCLUDED.last_failed_at RETURNING failed_count",
+            (username, now),
+        )
+        failed_count = cur.fetchone()[0]
+        locked = failed_count >= LOCKOUT_THRESHOLD
+        if locked:
+            cur.execute("UPDATE login_state SET locked_until = %s WHERE username = %s",
+                        (now + timedelta(minutes=LOCKOUT_MINUTES), username))
+    conn.commit()
+    LOGINS.labels("bad_password").inc()
+    log_event("login_failed", reason="bad_password", user=username)
+    if locked:
+        # A distinct event so Wazuh/Prometheus can see the lock engage (server-side only; the client got
+        # the same generic 401 above).
+        log_event("account_locked", user=username, after=failed_count)
     return jsonify(error="invalid credentials"), 401
 
 
