@@ -188,9 +188,14 @@ the point — it hides under the thresholds that catch DoS/stuffing). Evidence i
 
 - `images/apt/apt_chain_transcript.txt` — the full chain with the leaked password and the
   dumped hashes.
-- Wazuh dashboard: `100121` (injection), `100123` (C2), `100122` (recon) and the
-  `100130` **chain** alert for one foothold IP within one window. *(Dashboard captures: TODO
-  — Discover filtered to `rule.id:(100121 OR 100122 OR 100123 OR 100130)`.)*
+- Wazuh dashboard (Discover, `wazuh-alerts-*`, filtered to the APT rule ids):
+  - `images/apt/ui/wazuh_apt-chain.png` — the `100130` **chain** alerts (level 14, foothold
+    `10.10.1.22`, "called out to the attacker network AND probed internal hosts within 10m"),
+    with the per-run spikes in the histogram.
+  - `images/apt/ui/wazuh_apt-entry-c2.png` — the entry legs: `100121` injection (level 12)
+    with the reverse-shell payload captured in the `sensor` value, and `100123` C2 (level 10).
+  - `images/apt/ui/wazuh_apt-legs.png` — the `100122` recon legs (level 8, "blocked connection
+    … not in the call graph").
 
 Before / during / after:
 
