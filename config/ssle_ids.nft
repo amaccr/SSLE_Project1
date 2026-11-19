@@ -1,0 +1,29 @@
+#!/usr/sbin/nft -f
+#
+# SSLE host IDS -- log a backend reaching OUT to the external actor network (APT C2 / exfil signal).
+#
+# A site backend (10.10.1.0/24 avr, 10.10.2.0/24 lis) has no legitimate reason to *initiate* a connection
+# TO the inet zone (192.168.100.0/24: client, attacker, public lb): apps receive from the load balancer,
+# they never call the client network, and apt traffic goes to the real internet, not here. So a NEW
+# connection from a site subnet to 192.168.100.0/24 is a reverse shell or data exfiltration -- exactly the
+# APT's call-home (api-01 -> attacker-01:443 in scripts/apt_chain.py). Zero false positives by construction.
+#
+# The firewall ALLOWS this (the broad "apt needs 80/443 to any" egress rule -- docs/architecture.md
+# "Firewall" flags it as an exfil/reverse-shell path), so Incus never drops or logs it. We log it here.
+# This is the "new outbound connection not in the call graph" APT signal from docs/architecture.md.
+#
+# Design (same rationale as before): a separate table so Incus's regeneration never touches it; on the
+# inet FORWARD hook, because this egress is ROUTED between bridges (avr -> inet) and so, being allowed,
+# reaches L3 forwarding (unlike the bridge-level ACL drops); LOG ONLY, no verdict, so it can never affect
+# connectivity. build.sh applies it so a rebuild keeps it.
+
+table inet ssle_ids
+delete table inet ssle_ids
+
+table inet ssle_ids {
+    chain egress_watch {
+        type filter hook forward priority -100; policy accept;
+        ct state new ip saddr { 10.10.1.0/24, 10.10.2.0/24 } ip daddr 192.168.100.0/24 \
+            meta l4proto tcp log prefix "SSLE-C2 " level warn
+    }
+}

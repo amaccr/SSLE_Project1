@@ -54,3 +54,85 @@
   </rule>
 
 </group>
+
+<!-- APT (threat 3) -- the CORRELATION threat: no single rule below proves an intrusion, the CHAIN does.
+     Reads the same app JSON log as the credential-stuffing rules (/var/log/ssle/api.log). The custom JSON
+     keys (event, app, sensor) are matched by name; "user" is mapped to dstuser and "src" kept as src by
+     the decoder, exactly as noted for threat 2. -->
+<group name="apt,attack,">
+
+  <!-- The deliberately vulnerable /report endpoint was invoked (raw marker). Benign on its own: a legit
+       report IS this event with a clean sensor id. Level 3 so it is recorded and the injection rule below
+       can child off it. -->
+  <rule id="100120" level="3">
+    <decoded_as>json</decoded_as>
+    <field name="app">^ssle-api$</field>
+    <field name="event">^report$</field>
+    <description>SSLE /report by '$(dstuser)' from $(src) (sensor=$(sensor))</description>
+    <group>apt,</group>
+  </rule>
+
+  <!-- Command injection (APT EXECUTION stage): the sensor contains a character OUTSIDE the safe set
+       ^[a-z0-9-]+$. Allowlist, not a bad-char blocklist, so no forgotten metacharacter can bypass it.
+       A legitimate sensor id never does this, so it is a near-conclusive RCE attempt. Level 12, but NO
+       active response (see docs/threats/apt.md "Response": auto-response is riskier here than for DoS).
+       This is the anchor the correlation rule 100130 keys off. -->
+  <rule id="100121" level="12">
+    <if_sid>100120</if_sid>
+    <field name="sensor" type="pcre2">[^a-z0-9-]</field>
+    <description>APT: command injection in /report sensor from $(src) on $(host) (sensor=$(sensor))</description>
+    <group>apt,command_injection,pci_dss_6.5.1,</group>
+  </rule>
+
+  <!-- APT LATERAL MOVEMENT stage: a blocked OUTBOUND attempt from an internal host to an internal target
+       the call graph forbids. The host (h01) ships the Incus/nftables kernel drop lines from journald;
+       Wazuh's BUILT-IN kernel/iptables decoder parses them (action, srcip, dstip, dstport, protocol) and
+       raises the generic firewall rule 4100 at level 0. We child off 4100 and keep only the EGRESS drops
+       (action eth0-egress = the outbound attempt, srcip = the foothold) between two INTERNAL hosts. The
+       host agent already filters the journald stream to eth0-egress + PROTO=TCP, so the DHCP noise (UDP)
+       never arrives. On its own this is only level 8 -- a one-off could be a misconfiguration or fat-finger;
+       it becomes conclusive only in the chain (rule 100130). -->
+  <rule id="100122" level="8">
+    <if_sid>4100</if_sid>
+    <action>eth0-egress</action>
+    <srcip>10.10.0.0/16</srcip>
+    <dstip>10.10.0.0/16</dstip>
+    <description>APT recon: blocked connection from $(srcip) to $(dstip):$(dstport) (not in the call graph)</description>
+    <group>apt,recon,</group>
+  </rule>
+
+  <!-- APT C2 / EXFIL stage: a site backend INITIATED a connection to the external actor network
+       (192.168.100.0/24: client/attacker/public lb). A backend never does this legitimately (apt goes to
+       the real internet, not here), so it is a reverse shell calling home or data exfiltration. The
+       firewall allows it (broad apt egress rule), so it is logged by our host IDS rule (config/ssle_ids.nft,
+       prefix SSLE-C2) rather than dropped; Wazuh's built-in kernel decoder parses it (rule 4100). This is
+       the "new outbound connection not in the call graph" signal from docs/architecture.md. -->
+  <rule id="100123" level="10">
+    <if_sid>4100</if_sid>
+    <action>SSLE-C2</action>
+    <srcip>10.10.0.0/16</srcip>
+    <description>APT C2: backend $(srcip) called out to the external network $(dstip):$(dstport) (reverse shell / exfil)</description>
+    <group>apt,command_control,pci_dss_10.6.1,</group>
+  </rule>
+
+  <!-- APT CHAIN (the correlation): the SAME foothold both CALLED OUT to the attacker network (100123, C2)
+       and PROBED internal hosts it may not reach (100122, recon), within 10 minutes. Neither leg proves an
+       intrusion alone (a blocked probe could be a misconfig; one odd egress could be a fat-finger), but a
+       host doing BOTH is a compromised host moving with intent -- the whole point of the APT "correlation"
+       threat. Level 14, the highest in the project, because the chain is conclusive where no single leg is.
+       Both legs are observed by the SAME agent (the host, h01) and carry the foothold's IP as srcip, so we
+       correlate with <same_field>srcip</same_field>. This is deliberate: Wazuh's if_matched_sid correlation
+       is PER-AGENT (verified -- a cross-agent timeframe correlation with the API-log injection never fired),
+       so the robust chain is built from two host-observed network signals keyed on one field. The command
+       injection itself stays a strong standalone alert (100121, level 12) -- the "how they got in". See
+       docs/threats/apt.md "Detection" for this per-agent limitation and why it shapes the design. -->
+  <rule id="100130" level="14" timeframe="600">
+    <if_sid>100122</if_sid>
+    <if_matched_sid>100123</if_matched_sid>
+    <same_source_ip />
+
+    <description>APT CHAIN: foothold $(srcip) called out to the attacker network AND probed internal hosts (recon) within 10m</description>
+    <group>apt,attack,correlation,pci_dss_10.6.1,</group>
+  </rule>
+
+</group>
