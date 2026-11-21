@@ -1,0 +1,104 @@
+// System attack-defence tree for the report (docs/report.md, section 4).
+//   red boxes  = attacker goal / steps      green boxes = countermeasures (defences)
+//   solid black = decomposition             green dashed = "mitigated by"
+//   purple dashed = cross-branch "enables" (the chaining thesis)
+//   diamonds = OR / AND(sequence) refinement gates
+// Render:  dot -Tpng docs/adtree.dot -o images/adtree.png
+digraph adtree {
+  rankdir=TB;
+  splines=true;
+  newrank=true;
+  nodesep=0.3;
+  ranksep=0.55;
+  bgcolor="white";
+  fontname="Helvetica";
+  labelloc=t;
+  label=<<b>Figure 2 — System attack–defence tree (red = attacker goals/steps, green = countermeasures)</b>>;
+  fontsize=15;
+
+  node [shape=box, style="rounded,filled", fillcolor="white", color="#b42318",
+        fontname="Helvetica", fontsize=10, margin="0.13,0.07"];
+  edge [fontname="Helvetica", fontsize=9, color="#30363d"];
+
+  // defence node macro (applied by listing them together)
+  node [group=""];
+
+  root [label="Attacker goal: compromise the sensor-portal\n(deny availability  OR  steal operator data)",
+        penwidth=2, fillcolor="#fde8e6"];
+  orgate [label="OR", shape=diamond, color="#6a737d", fillcolor="#eceff1",
+          fontsize=9, width=0.5, height=0.4, fixedsize=true];
+  root -> orgate [dir=none];
+
+  // ===================== DoS branch =====================
+  dos   [label="Deny availability\n(DoS)", fillcolor="#fde8e6", penwidth=1.5];
+  dos_a [label="Volumetric flood of POST /login\n(each bad login pays a slow pbkdf2 hash)"];
+  orgate -> dos [dir=none];
+  dos -> dos_a;
+  d_dos1 [label="nginx limit_req + Wazuh\nfirewall-drop  (per-IP)",
+          color="#2f9e52", fillcolor="#e7f4ea", fontcolor="#1a5c32"];
+  d_dos2 [label="Prometheus saturation alert\n(aggregate; catches distributed)",
+          color="#2f9e52", fillcolor="#e7f4ea", fontcolor="#1a5c32"];
+  dos_a -> d_dos1 [style=dashed, color="#2f9e52", dir=none];
+  dos_a -> d_dos2 [style=dashed, color="#2f9e52", dir=none];
+
+  // ===================== Credential-stuffing branch =====================
+  cred   [label="Obtain a valid account\n(credential stuffing)", fillcolor="#fde8e6", penwidth=1.5];
+  orgate -> cred [dir=none];
+  cred_or [label="OR", shape=diamond, color="#6a737d", fillcolor="#eceff1",
+           fontsize=9, width=0.5, height=0.4, fixedsize=true];
+  cred -> cred_or [dir=none];
+  c_spray [label="Horizontal spray\n(replay a leaked dump)"];
+  c_brute [label="Vertical brute-force\n(one account)"];
+  cred_or -> c_spray;
+  cred_or -> c_brute;
+  c_take  [label="Reused-password takeover\n(bob : password123)",
+           fillcolor="#fff3cd", color="#b4870f"];
+  c_spray -> c_take [label="if reused", fontsize=8];
+  d_lock [label="per-account lockout\n(checked before the hash)",
+          color="#2f9e52", fillcolor="#e7f4ea", fontcolor="#1a5c32"];
+  d_agg  [label="aggregate no_user alert +\nWazuh distinct-user correlation",
+          color="#2f9e52", fillcolor="#e7f4ea", fontcolor="#1a5c32"];
+  d_mfa  [label="password policy / MFA\n(only control that stops takeover)",
+          color="#2f9e52", fillcolor="#e7f4ea", fontcolor="#1a5c32"];
+  c_brute -> d_lock [style=dashed, color="#2f9e52", dir=none];
+  c_spray -> d_agg  [style=dashed, color="#2f9e52", dir=none];
+  c_take  -> d_mfa  [style=dashed, color="#2f9e52", dir=none];
+
+  // ===================== APT branch (sequential AND) =====================
+  apt     [label="Reach + exfiltrate the database\n(APT — multi-stage)",
+           fillcolor="#fde8e6", penwidth=1.5];
+  orgate -> apt [dir=none];
+  apt_and [label="AND\n(seq.)", shape=diamond, color="#6a737d", fillcolor="#eceff1",
+           fontsize=9, width=0.6, height=0.5, fixedsize=true];
+  apt -> apt_and [dir=none];
+  s1 [label="1 · Initial access:\nvalid operator session"];
+  s2 [label="2 · Code execution:\ncommand injection via /report"];
+  s3 [label="3 · C2:\nreverse-shell egress :443"];
+  s4 [label="4 · Discovery:\nprobe internal hosts"];
+  s5 [label="5 · Credential access:\nread DB_PASSWORD (/proc)"];
+  s6 [label="6 · Exfiltration:\ndump users from db-01"];
+  apt_and -> s1 -> s2 -> s3 -> s4 -> s5 -> s6;
+
+  d_val [label="input allow-list\n^[a-z0-9-]+$ on /report",
+         color="#2f9e52", fillcolor="#e7f4ea", fontcolor="#1a5c32"];
+  d_ids [label="nft C2 log + ACL drop log\n→ Wazuh chain rule 100130",
+         color="#2f9e52", fillcolor="#e7f4ea", fontcolor="#1a5c32"];
+  d_fw  [label="deny-by-default firewall\n(blocks + logs lateral)",
+         color="#2f9e52", fillcolor="#e7f4ea", fontcolor="#1a5c32"];
+  d_ir  [label="alert + human IR playbook\n(no auto-block: would self-DoS)",
+         color="#2f9e52", fillcolor="#e7f4ea", fontcolor="#1a5c32"];
+  s2 -> d_val [style=dashed, color="#2f9e52", dir=none];
+  s3 -> d_ids [style=dashed, color="#2f9e52", dir=none];
+  s4 -> d_fw  [style=dashed, color="#2f9e52", dir=none];
+  s6 -> d_ir  [style=dashed, color="#2f9e52", dir=none];
+
+  // keep each APT defence beside (not below) its step, so the chain stays vertical
+  {rank=same; s2; d_val;}
+  {rank=same; s3; d_ids;}
+  {rank=same; s4; d_fw;}
+  {rank=same; s6; d_ir;}
+
+  // ===================== cross-branch chain (the thesis) =====================
+  c_take -> s1 [label="enables", style=dashed, color="#8250df",
+                fontcolor="#8250df", constraint=false];
+}
