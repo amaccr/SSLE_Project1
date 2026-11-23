@@ -309,10 +309,36 @@ NGINX
 # Guide 3's exporter (apps/host-exporter). Installing a systemd unit needs root, so THIS function is the
 # only place build.sh uses sudo (one prompt); the rest must run as the normal incus user, never under
 # sudo (root's incus wouldn't see the user's instances). The service itself runs as the invoking user,
-# who has incus access through the incus group. Single listener for now; lis would add 10.10.2.1:9101.
+# who has incus access through the incus group.
+#
+# One exporter, one listener PER monitoring domain (docs/architecture.md "One host exporter, two listeners").
+# Generated from config so adding a site needs no hand-editing:
+#   - the mgmt listener (10.10.0.1): the central prom. Shows the mgmt plane (default project) plus every
+#     DIRECTLY-scraped site (one with no prom of its own, e.g. avr).
+#   - one listener per FEDERATED site (one with its own prom, e.g. lis) on that site's gateway: shows ONLY
+#     that site, so its local prom scrapes it and the central prom does not double-count it via federation.
+# The interface you connect through decides what you see, so a URL parameter (which the caller could forge)
+# is not needed. A host firewall then lets only a site's own prom reach its listener.
 provision_host_exporter() {
     local user; user=$(id -un)
     sudo install -D -m 755 "$REPO/apps/host-exporter/host_exporter.py" /opt/ssle-host-exporter/host_exporter.py
+
+    local site region prefix prom_ip mgmt_projects="default" listen="" fed_rules=""
+    for site in $(awk '!/^#/ && NF { print $1 }' "$SITES_CONF"); do
+        read -r region prefix _ < <(site_info "$site")
+        prom_ip=$(ips_of "$site" prom)
+        # A federated site gets its own listener only once its network exists (so binding can't fail on a
+        # site that is defined but not built yet); until then it rides the mgmt listener harmlessly.
+        if [ -n "$prom_ip" ] && incus network show "ssle-$site" > /dev/null 2>&1; then
+            listen="$listen --listen $prefix.1=$site"
+            fed_rules="$fed_rules        ip daddr $prefix.1 tcp dport 9101 ip saddr != $prom_ip drop
+"
+        else
+            mgmt_projects="$mgmt_projects,$site"
+        fi
+    done
+    listen="--listen $MGMT_DNS=$mgmt_projects$listen"
+
     sudo tee /etc/systemd/system/ssle-host-exporter.service > /dev/null <<UNIT
 [Unit]
 Description=SSLE per-host Incus metrics exporter
@@ -320,7 +346,7 @@ After=incus.service network-online.target
 
 [Service]
 User=$user
-ExecStart=/usr/bin/python3 /opt/ssle-host-exporter/host_exporter.py --listen $MGMT_DNS --port 9101
+ExecStart=/usr/bin/python3 /opt/ssle-host-exporter/host_exporter.py $listen --port 9101
 Restart=on-failure
 
 [Install]
@@ -328,8 +354,23 @@ WantedBy=multi-user.target
 UNIT
     sudo systemctl daemon-reload
     sudo systemctl enable --now ssle-host-exporter > /dev/null 2>&1
-    sudo systemctl restart ssle-host-exporter          # pick up new code on a re-run
-    echo "host exporter: serving on $MGMT_DNS:9101"
+    sudo systemctl restart ssle-host-exporter          # pick up new code / new listeners on a re-run
+
+    # Host firewall for the site listeners: only a site's own Prometheus may reach its gateway:9101.
+    # Separate nft table with a delete guard + policy accept, so it can never break other traffic (same
+    # pattern as config/ssle_ids.nft). Re-applied on every run; not persistent across reboot.
+    if command -v nft > /dev/null; then
+        sudo nft -f - <<NFT
+table inet ssle_exporter
+delete table inet ssle_exporter
+table inet ssle_exporter {
+    chain exporter_in {
+        type filter hook input priority -100; policy accept;
+$fed_rules    }
+}
+NFT
+    fi
+    echo "host exporter: $listen"
 }
 
 # --- SIEM agent on the VM host: ships the kernel firewall-drop logs (APT lateral-movement signal) --------
@@ -438,6 +479,55 @@ RULES
     run_in "$p" "$i" promtool check config /etc/prometheus/prometheus.yml > /dev/null
     run_in "$p" "$i" systemctl restart prometheus
     echo "instance $i: prometheus ready"
+}
+
+# provision_site_prom <project> <instance> <domain> <prefix>
+# A site-LOCAL Prometheus (e.g. prom-01.lis), as opposed to the central provision_prom above. It scrapes
+# ONLY its own site -- the site's app /metrics (:9102) and the site's host-exporter listener (<gw>:9101) --
+# and exposes the built-in /federate endpoint, which prom-01.ssle pulls in bulk (register_prom_targets
+# writes federate-<site>.json for it). This is the federation half of the bandwidth-optimisation design
+# (docs/architecture.md "Uneven Prometheus, on purpose"): the central server makes ONE compact /federate
+# pull per interval instead of scraping every target across the link. Alert rules stay central (they
+# evaluate the federated series), so a site prom carries none.
+provision_site_prom() {
+    local p=$1 i=$2 domain=$3 prefix=$4 site=$1 apps
+    run_in "$p" "$i" test -x /usr/bin/prometheus \
+        || { run_in "$p" "$i" apt-get -qq update; apt_install "$p" "$i" --no-install-recommends prometheus; }
+    # app targets = this site's api/analytics instances, as full DNS names (resolved by the site's own DNS).
+    apps=$(awk -v s="$site" -v d="$domain" \
+        '$1 == s && ($3 == "api" || $3 == "analytics") { printf "%s'\''%s.%s:9102'\''", sep, $2, d; sep = ", " }' \
+        "$INSTANCES_CONF")
+    run_in "$p" "$i" sh -c 'cat > /etc/prometheus/prometheus.yml' <<PROM
+# Generated by scripts/build.sh (edits are overwritten). Site-local Prometheus for $site, federated by prom-01.ssle.
+global:
+  scrape_interval: 15s
+  evaluation_interval: 15s
+
+scrape_configs:
+  - job_name: prometheus
+    static_configs:
+      - targets: ['localhost:9090']
+
+  # The site's own containers, from the host exporter's site-bridge listener ($prefix.1:9101). Only this
+  # site's Prometheus may reach that listener (host firewall, docs/architecture.md "two listeners").
+  - job_name: host
+    static_configs:
+      - targets: ['$prefix.1:9101']
+
+  # The site's app /metrics (:9102), scraped LOCALLY; the central server never scrapes these directly.
+  - job_name: app
+    static_configs:
+      - targets: [$apps]
+        labels: {site: $site}
+    relabel_configs:
+      # instance = the bare DNS name (api-01.lis.pt.ssle), so it joins with container_info (docs/naming.md)
+      - source_labels: [__address__]
+        regex: '([^:]+):\d+'
+        target_label: instance
+PROM
+    run_in "$p" "$i" promtool check config /etc/prometheus/prometheus.yml > /dev/null
+    run_in "$p" "$i" systemctl restart prometheus
+    echo "instance $i: site Prometheus ready (federated by prom-01.ssle)"
 }
 
 # register_prom_targets <site>: tells prom-01.ssle what to scrape in this site.
@@ -781,11 +871,14 @@ acl_yaml() {
         api|analytics) acl_rule ingress tcp "$lb"          5000 "lb -> app"
                        acl_rule ingress tcp "$prom"        9102 "prometheus -> app /metrics" ;;
         db)            acl_rule ingress tcp "$backends"    5432 "api, analytics -> postgres" ;;
+        prom)          acl_rule ingress tcp "$PROM_IP"     9090 "central prom -> /federate" ;;
     esac
     echo "egress:"
     case $role in
         lb)            acl_rule egress tcp "$backends" 5000 "nginx -> api, analytics" ;;
         api|analytics) acl_rule egress tcp "$db"       5432 "app -> postgres" ;;
+        prom)          acl_rule egress tcp "$backends" 9102 "scrape site app /metrics"
+                       acl_rule egress tcp "$gw"       9101 "scrape host exporter (site bridge)" ;;
     esac
     # Flows every instance needs (deny by default would silently break them):
     acl_rule egress udp "$gw"      53        "DNS (site dnsmasq)"
@@ -808,6 +901,9 @@ ensure_acls() {
     done
     while read -r inst role <&3; do
         for nic in $(incus config device list "$inst" --project "$site"); do
+            # Only network cards take ACLs: an instance created with --storage also has an instance-level
+            # "root" disk device, and security.acls is invalid on a disk (it would fail the whole build).
+            [ "$(incus config device get "$inst" "$nic" type --project "$site")" = nic ] || continue
             incus config device set "$inst" "$nic" --project "$site" security.acls="acl-$site-$role" \
                 security.acls.default.ingress.action=drop security.acls.default.egress.action=reject \
                 security.acls.default.ingress.logged=true security.acls.default.egress.logged=true
@@ -876,10 +972,11 @@ site() {
     while read -r inst role host owner <&3; do
         ensure_instance "$name" "$inst" "ssle-$name" "$prefix.$host" "$owner"
         case $role in
-            db)  provision_db  "$name" "$inst" "$prefix.0/24" ;;
-            api) provision_api "$name" "$inst" "$domain" ;;
-            lb)  provision_lb  "$name" "$inst" "$name" "$domain" "$public" ;;
-            *)   echo "instance $inst: role '$role' not written yet, skipped" >&2 ;;
+            db)   provision_db        "$name" "$inst" "$prefix.0/24" ;;
+            api)  provision_api       "$name" "$inst" "$domain" ;;
+            lb)   provision_lb        "$name" "$inst" "$name" "$domain" "$public" ;;
+            prom) provision_site_prom "$name" "$inst" "$domain" "$prefix" ;;
+            *)    echo "instance $inst: role '$role' not written yet, skipped" >&2 ;;
         esac
     done 3< <(awk -v s="$name" '$1 == s { print $2, $3, $4, $5 }' "$INSTANCES_CONF")
     # The list is read from fd 3, not stdin: incus exec inside the loop reads stdin and would

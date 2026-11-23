@@ -53,10 +53,10 @@ digraph arch {
     siem [label="siem-01 (.20)\nWazuh manager + dashboard"];
   }
 
-  // ---- site lis (design-only, summarised to one node) ----
-  lis [label="site lis  (design-only, §6)\napi-01.lis · db-01.lis · prom-01.lis\nssle-lis 10.10.2.0/24 — one more build-script run",
-       style="rounded,dashed,filled", fillcolor="#f1f2f4",
-       color="#9aa0a6", fontcolor="#6a737d", fontsize=10];
+  // ---- site lis (built: scalability + bandwidth measurement, §6.3) ----
+  lis [label="site lis  (built, §6.3)\napi-01.lis · db-01.lis · prom-01.lis (local, federated)\nssle-lis 10.10.2.0/24 — one build-script run",
+       style="rounded,filled", fillcolor="#eef1f4",
+       color="#30363d", fontcolor="#24292f", fontsize=10];
 
   // ---- physical host ----
   host [label="h01.ssle — physical host (the VM): runs every container  ·  host exporter (CPU/mem/net, :9101)  ·  Wazuh host agent (nft IDS + firewall-drop logs)",
