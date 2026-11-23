@@ -26,6 +26,20 @@ Run it as your normal user (never `sudo ./scripts/build.sh`). Every step is idem
 again converges to the same state and deploys the current code. Adding a site means one line in
 `config/sites.conf`, its instances in `config/instances.conf`, and `./scripts/build.sh site <name>`.
 
+**Building the report PDF** (from the repository root, needs `texlive-xetex` and `texlive-latex-extra`):
+
+```bash
+pandoc docs/report.md -o report.pdf --pdf-engine=xelatex --toc \
+  --shift-heading-level-by=-1 --resource-path=docs
+```
+
+Section numbers are written by hand in the headings, so do not add `--number-sections`.
+The `newunicodechar` lines in the YAML header map arrows and relations that the Latin Modern
+font lacks to math symbols. The attack-defence trees are `images/Adtree*.drawio.png`: each PNG
+embeds its draw.io source, so open it in draw.io, edit, and export again as PNG (zoom 300%,
+"Include a copy of my diagram" ticked) over the same file. PNG rather than SVG because
+draw.io's SVG labels are HTML, which the SVG-to-PDF step drops.
+
 **Running the demo:** see [`docs/demo.md`](docs/demo.md) for the pre-flight check, each attack command,
 what to show in Prometheus and Wazuh, and how to reset between runs.
 
@@ -33,7 +47,7 @@ what to show in Prometheus and Wazuh, and how to reset between runs.
 
 | Path | What |
 |---|---|
-| `docs/report.md` | The report (build instructions for the PDF at the top) |
+| `docs/report.md` | The report (see *Building the report PDF* above) |
 | `docs/demo.md` | Demo runbook |
 | `docs/architecture.md`, `docs/naming.md` | Design decisions: instances, flows, firewall, DNS; the naming scheme |
 | `docs/threats/` | Working notes and measurements per threat (`dos.md`, `credstuffing.md`, `apt.md`) |
