@@ -2,9 +2,13 @@
 Build the PDF with:
   pandoc docs/report.md -o report.pdf --toc --number-sections \
     --resource-path=.:docs -V geometry:margin=2.5cm -V fontsize=11pt
-Figures are rebuilt from docs/architecture.dot and docs/adtree.dot with:
+The architecture figure is rebuilt from docs/architecture.dot with:
   dot -Tpng docs/architecture.dot -o images/architecture.png
-  dot -Tpng docs/adtree.dot -o images/adtree.png
+The attack-defence trees (Figs. 2, 4, 6, 8) are images/Adtree*.drawio.png: each PNG is
+its own source (draw.io embeds the diagram in it), so open it directly in draw.io
+(app.diagrams.net), edit, and export again as PNG (zoom 300%, "Include a copy of my
+diagram" ticked) over the same file. PNG rather than SVG because draw.io's SVG labels
+are HTML (<foreignObject>), which the SVG-to-PDF step drops, leaving blank nodes.
 -->
 
 # Threat Detection, Monitoring and Prevention in a Scalable Service Architecture
@@ -78,9 +82,10 @@ Schneier [1], model an attacker's goal as a root refined into sub-goals and conc
 steps combined by AND/OR gates, giving a systematic way to enumerate how a system can be
 attacked. Kordy et al. [2] extend them to *attack–defence trees*, which interleave
 countermeasures with attacks in the same structure so that mitigations are reasoned
-about alongside the threats they answer. Section 4 uses exactly this formalism: a single
-system attack–defence tree (Fig. 2) with the three threats as OR-refinements of one goal
-and defences as countermeasure nodes.
+about alongside the threats they answer. Section 4 uses exactly this formalism: a system
+attack–defence tree (Fig. 2) with the three threats as OR-refinements of one goal, each
+refined in its own subtree in Section 5 (Figs. 4, 6, 8) with defences as countermeasure
+nodes.
 
 **Large-scale monitoring and fault management.** The classic framework for managing large
 networks is the ITU-T TMN model and its FCAPS functional areas — fault, configuration,
@@ -128,8 +133,8 @@ application call graph, and the monitoring/SIEM plane.
 *Figure 1. Service architecture. **Black** edges are the application call graph;
 **red** the attack path from the outside world; **green dotted** the Prometheus
 scrape and federation flows; **purple dashed** the Wazuh agent→manager flow (drawn
-once; every instance runs an agent). Dashed boxes are design-only (`analytics-01`,
-the `lis` site). The physical host `h01` runs every container and is observed, not
+once; every instance runs an agent). The dashed `analytics-01` box is design-only; the
+`lis` site is built (§6.3). The physical host `h01` runs every container and is observed, not
 trusted, by its own exporter and Wazuh agent.*
 
 ### 3.1 Components, the call graph, and the single exposed surface
@@ -233,7 +238,7 @@ the logs. The fix is a rule that drops all forwarding from `inet` into the inter
 subnets; with it, **only `src` is trustworthy**, and only because of nginx plus the
 firewall.
 
-*Limitation.* The APT needs outbound 80/443 to the internet, so that egress is allowed
+*Limitation.* Package installation (`apt`) needs outbound 80/443 to the internet, so that egress is allowed
 to any address — which is also a reverse-shell and exfiltration path (it returns as a
 detection problem in §5.3). And bridge-ACL drops are recorded only in the VM's kernel
 log, so using them as a signal requires shipping that log to Wazuh (done for the APT).
@@ -267,10 +272,10 @@ physical host `h01` that ships the firewall and IDS logs the APT detection relie
 The design also anticipates **horizontal growth**: a second site, `lis`, is specified
 with its own database and a *local* Prometheus that the central one **federates**,
 deliberately a different collection pattern from directly-scraped `avr`. This asymmetry
-is intentional — it lets the bandwidth cost of each pattern be measured rather than
-asserted (§6). The `lis` site is kept design-only; the rationale for *monitoring
-strategy* (what each tool watches and why), the attack-surface and attack/defence-tree
-analysis, and the scalability evaluation are developed in §4 and §6.
+is intentional — it lets the bandwidth cost of each pattern be *measured* rather than
+asserted, and §6.3 reports those figures from the built `lis` site. The rationale for
+*monitoring strategy* (what each tool watches and why), the attack-surface and
+attack/defence-tree analysis, and the scalability evaluation are developed in §4 and §6.
 
 ## 4. Risk Management and Mitigation
 
@@ -311,36 +316,58 @@ cost, a reused credential, and an application bug rather than the network.
 
 ### 4.2 Attack–defence tree
 
-Figure 2 models the whole system as a single **attack–defence tree**: the attacker's
-goal at the root, refined downward into the ways to achieve it, with countermeasures
-(green) attached to the attack nodes they mitigate.
+The model is an **attack–defence tree** in the notation of Kordy et al. [2]: the
+attacker's goal at the root, refined downward into the ways to achieve it, with
+countermeasures attached to the attack nodes they mitigate. Figure 2 is the top of the
+tree — the goal and the three threats — and each threat is refined in its own subtree
+next to its detection and response in Section 5 (Figs. 4, 6 and 8).
 
-![](../images/adtree.png)
+![](../images/AdtreeOverview.drawio.png){width=75%}
 
-*Figure 2. System attack–defence tree. Red nodes are the attacker's goal and steps,
-green nodes are countermeasures, diamonds are OR/AND refinements. The three threats are
-**alternative** paths to the goal (OR), but the APT is itself a **sequence** of steps
-(AND), each a separate detection opportunity. The purple "enables" edge is the chain:
-the credential-stuffing takeover is the APT's initial access.*
+*Figure 2. System attack–defence tree, top level (notation in the legend below). The
+three threats are **alternative** ways to compromise the portal (OR). Exfiltrating the
+user database is an AND: it needs a valid operator session **and** the post-login steps
+refined in Fig. 8. The purple "ENABLES" link is the chain between branches: the
+account takeover of threat 2 supplies the operator session that threat 3 needs.*
+
+The same notation is used in all four attack–defence figures (Figs. 2, 4, 6 and 8):
+
+| Symbol | Meaning |
+|---|---|
+| red circle | attack (the goal or an attacker step) |
+| green rectangle | defence (countermeasure) |
+| `**` after a defence | proposed defence, **not implemented** in this project |
+| solid lines from a parent | OR refinement: any one child achieves the parent |
+| solid lines joined by an arc | AND refinement: every child is needed (in no particular order) |
+| black dotted line | countermeasure: a defence against an attack, or an attack that defeats a defence |
+| purple dashed line "ENABLES" | one branch's outcome is a step in another branch |
 
 Reading the tree makes three things explicit that prose alone blurs:
 
 1. **OR at the top, AND inside the APT.** Any one of the three threats reaches the
-   goal, so they are OR-siblings. But the APT decomposes into a *conjunction* of six
-   ordered steps — which is the structural reason it is the "correlation" threat: break
-   any one link and the chain fails, so every step is a place to detect or defend, and
-   no single step needs to be individually conclusive (§5.3).
-2. **The chain across branches.** The "enables" edge from *reused-password takeover* to
-   *APT initial access* shows that the branches are not independent: the cheapest
-   outcome of threat 2 is the entry condition of threat 3. This is the risk the
-   three-threats-as-one-story framing is built on.
-3. **Where prevention runs out.** The green nodes are not evenly distributed. The DoS
-   flood has a cheap *preventive* control (rate-limit + block); the vertical brute-force
-   has one (lockout); but the **horizontal spray** and the **reused-password takeover**
-   have no sufficient preventive defence at all — only detection, and ultimately MFA.
-   The tree shows this as green nodes that *detect* rather than *stop*. That asymmetry
-   is the seed of the evaluation in §6: the strength of a control depends on the shape
-   of the attack, not on the threat's name.
+   goal, so they are OR-siblings. But exfiltration is an AND of six necessary
+   conditions (Fig. 8) — a session, code execution, a C2 channel, discovery, the
+   database credential, and the dump. An AND in an attack–defence tree says that every
+   child is needed, not in which order; the order in which the PoC performs them is the
+   kill chain of §5.3. Being a conjunction is the structural reason the APT is the
+   "correlation" threat: remove any one child and the goal fails, so every child is a
+   place to detect or defend, and no single child needs to be conclusive on its own
+   (§5.3, which also shows that one of these "necessary" children is not).
+2. **The chain across branches.** The "ENABLES" link from *take over an operator
+   account* to *valid operator session* shows that the branches are not independent:
+   the cheapest outcome of threat 2 is the entry condition of threat 3. This is the risk
+   the three-threats-as-one-story framing is built on.
+3. **Where prevention runs out.** The subtrees show it in two ways. First, some
+   defences have a dotted **counter-attack** under them: spreading the attack over a
+   botnet defeats the per-IP controls against the DoS flood (Fig. 4) and Wazuh's
+   per-source stuffing rule (Fig. 6), and a C2 server on a real internet address
+   defeats the egress log (Fig. 8). What answers the botnet is a Prometheus
+   **aggregate** alert, which *detects* but does not *stop*, and nothing answers the
+   real-internet C2. Second, the `**` nodes (soft lockout / backoff, MFA, egress only
+   via an `apt` proxy, secrets out of env + rotation) mark the places where the system
+   as built has no preventive control at all. That asymmetry is the seed of the
+   evaluation in §6: the strength of a control depends on the shape of the attack, not
+   on the threat's name.
 
 ### 4.3 Large-scale monitoring
 
@@ -437,6 +464,18 @@ nginx rate-limiting is on, the 429s never reach the application, so the flood be
 and login latency with it; nginx `limit_req` then caps the flood back to the per-IP
 limit. Rendered from Prometheus's range API.*
 
+![](../images/Adtree_DoS.drawio.png){width=55%}
+
+*Figure 4. DoS attack–defence subtree (notation as in the legend in §4.2). The flood is
+answered by two per-IP controls that act together (AND); a botnet defeats both, leaving
+only the aggregate Prometheus alert. Lockout abuse has only a proposed defence (`**`).*
+
+Figure 4 places the controls of this section on the attack they answer. *Deny service*
+has two alternatives. The **flood** is countered by the **per-IP controls**, nginx
+`limit_req` and the Wazuh `100101` → `firewall-drop` block, described next. The second
+alternative, **locking victims out on purpose**, needs no flood at all and is a side
+effect of the §5.2 lockout; it is discussed in the post-mortem.
+
 **Action-response.** Two layers. **Prevention:** nginx `limit_req` (10 r/s, burst 20 →
 HTTP 429) cut a single-source flood from ~56 to ~10 req/s reaching the APIs, dropped API
 CPU from ~3.07 to ~0.54 cores and p95 from 0.24 to 0.074 s — the cheap 429 shields the
@@ -460,9 +499,25 @@ buffer and logged "Events may be lost", so a volumetric flood drops SIEM events 
 when the attack is loudest; the aggregate Prometheus signal and the nginx edge are more
 reliable than per-event alerting here. Second, and the bridge to the next section: the
 per-IP rate limit and the per-IP block both **assume one source**. *Spread the same
-request budget across a botnet and both are defeated* — the control that works here is
-the one §5.2 breaks. The slow pbkdf2 hash exploited here as an amplifier also returns in
-§5.2, where the per-account lockout learns to **avoid** paying it.
+request budget across a botnet and both are defeated*: each bot stays under 10 r/s and
+under the `100101` threshold, while the APIs still receive the full sum. This is the
+*distribute flood over a botnet* node in Fig. 4, which defeats the per-IP controls. What
+still sees it is the Prometheus request-rate / CPU-saturation alert, because it measures
+the site's total, not any one source. But it only **detects**; there is no safe per-IP
+block left to trigger, and the response falls back to capacity and a human. The control
+that works here is the one §5.2 breaks.
+
+The tree's second branch, **locking victims out on purpose**, is a denial of service
+with no flood: anyone who knows a username can send five wrong passwords and lock that
+operator out for 15 minutes, again and again, using the §5.2 lockout against its own
+users. Its countermeasure, **soft lockout / backoff**, is proposed (`**`) and not
+implemented: instead of a hard lock, each further failure would add an increasing delay
+for that account, answered with an immediate `429`/`Retry-After` rather than by holding
+a gunicorn worker (a server-side `sleep` would turn the defence into a new DoS
+amplifier). The trade-off is that the real user is still slowed down, just not locked
+out, and a botnet can keep the delay at its maximum. The slow pbkdf2 hash exploited here
+as an amplifier also returns in §5.2, where the per-account lockout learns to **avoid**
+paying it.
 
 ### 5.2 Credential Stuffing (and the botnet variant)
 
@@ -512,7 +567,7 @@ argument for an aggregate, not per-IP, response.
 
 ![](../images/credstuffing/plots/bad-logins_spray.png)
 
-*Figure 4. The spray's signature: `no_user` jumps from a 0 baseline to ~58/min while
+*Figure 5. The spray's signature: `no_user` jumps from a 0 baseline to ~58/min while
 every other login result stays flat — a near-perfect discriminator, and invisible to the
 DoS panels (CPU ~0.014 cores, ~200× below the flood).*
 
@@ -525,6 +580,28 @@ view: rule `100111` fires on ≥ 8 failed logins from the same `src` across *dis
 from a single-user brute-force. Crucially, the correlation runs at the **manager** keyed
 on `src`, so nginx round-robining the logins across `api-01`/`api-02` (91 vs 92 events in
 one run) does not blind it — load-balancing is transparent to the detection.
+
+![](../images/Adtree_Credstuffing.drawio.png){width=85%}
+
+*Figure 6. Credential-stuffing attack–defence subtree (notation as in the legend in
+§4.2). Stuffing needs all three of a dump, a reused password and the replay (AND); the
+botnet defeats the per-source Wazuh rule and is caught only by the aggregate alert.
+MFA is proposed (`**`).*
+
+Figure 6 shows why stuffing and brute-force need different controls. **Credential
+stuffing** is an AND of three conditions: the attacker has obtained a leaked dump, a
+victim reused that password here, and the dump is replayed at `/login`. Breaking any one
+of them stops it. The first is out of our hands (the breach happened elsewhere). The
+replay is countered by Wazuh `100111`, but *spread over a botnet* defeats that rule
+(measured above: 25 → 0), and the botnet is in turn caught by the aggregate Prometheus
+`no_user` > 3/min alert. That chain of counters ends in detection, not prevention. The
+only node that would **stop** a reused-password takeover is **MFA**, which is proposed
+(`**`) and not implemented: the lab has no second factor, and a replay of `bob`'s
+*correct* password is, to the application, a normal login. **Brute-force against one
+account** is the opposite case. It is countered by the **per-account controls** (the
+lockout, 5 failures / 15 min, together with the failed-logins > 10/min backstop), and
+no counter-attack defeats them, because the limit is per account and adding bots does
+not add attempts.
 
 **Action-response.** The primary control is a **per-account lockout** (5 consecutive
 failures → 15 min), with three deliberate design choices: lock state is a foreign key to
@@ -546,12 +623,13 @@ does, and does not, stop is the point:
 load-balancing, and the lockout provably stops the vertical brute-force — it rejected
 `alice`'s *correct* password while locked, the decisive test. The limitations are
 instructive. The spray has **no safe automated stop** (unlike DoS, the lockout does not
-change the spray's curve — each username is tried once), so detection and MFA matter more
-than any block. A **timing side-channel** remains: `no_user` and `locked` return before
+change the spray's curve — each username is tried once), so detection and MFA (proposed,
+not implemented) matter more than any block. A **timing side-channel** remains: `no_user` and `locked` return before
 the hash while a real wrong password pays it, so response time enables username
 enumeration despite identical 401 bodies (fix: a constant-time dummy hash). And the
 lockout is itself a **DoS vector** — an attacker who knows a username can lock it on
-purpose. This threat links back to §5.1 (the hash is both a DoS cost and a cost the lock
+purpose (the *lock victims out on purpose* branch of Fig. 4, whose proposed fix, soft
+lockout / backoff, is discussed in §5.1). This threat links back to §5.1 (the hash is both a DoS cost and a cost the lock
 avoids) and forward to §5.3 (a stolen valid credential is a quiet foothold, not a flood).
 
 ### 5.3 Advanced Persistent Threat (the correlation threat)
@@ -624,9 +702,35 @@ share a key.
 
 ![](../images/apt/ui/wazuh_apt-chain.png)
 
-*Figure 5. The `100130` chain alert (level 14) in the Wazuh dashboard: a single foothold
+*Figure 7. The `100130` chain alert (level 14) in the Wazuh dashboard: a single foothold
 that both reached the attacker network and probed internal hosts within ten minutes.
 Neither leg alone proves an intrusion; the conjunction does.*
+
+![](../images/Adtree_ATP.drawio.png)
+
+*Figure 8. APT attack–defence subtree (notation as in the legend in §4.2). Exfiltration
+needs all six children (AND, unordered; the order is the kill-chain table above). The
+chain alert `100130` counters the root. A C2 server outside the lab's actor network
+defeats the egress log; two defences are proposed (`**`).*
+
+Figure 8 puts a defence under each necessary step. **Code execution** is countered by
+the **/report controls**: the allow-list `^[a-z0-9-]+$` with no `shell=True`, together
+with Wazuh `100121`. In the PoC only the detection half is deployed. The allow-list
+exists as the `100121` regex, while the application keeps `shell=True` on purpose,
+because `/report` is the stand-in entry bug; applying the fix is a playbook step below.
+The **C2 reverse shell** is countered by the **egress controls**: the `SSLE-C2` nft log
+→ `100123`, together with **egress only via an `apt` proxy** (`**`). The counter-attack
+under them, **C2 to a real internet host**, is the other side of the "zero false
+positives" claimed above: the nft rule only logs connections to `192.168.100.0/24`, the
+lab's actor zone, so it never fires on legitimate traffic *because* the lab knows where
+the attacker lives. A real adversary on any
+internet address, over 443, passes the broad 80/443 egress rule (§3.4) and is **neither
+blocked nor logged**. Only the proposed proxy closes that, because then *every* direct
+outbound connection becomes an anomaly. **Discovery** is countered by the deny-by-default
+ACLs, whose drops feed `100122`. **Reading `DB_PASSWORD` from `/proc`** is countered only
+by **secrets out of env + rotation** (`**`), and **dumping `users`** only by the
+pbkdf2-hashed passwords, which slow offline cracking (both discussed in the post-mortem).
+The root itself is countered by the `100130` chain alert and the human playbook below.
 
 **Action-response.** The decision is **alert, don't auto-act**: `100130` pages a human
 and a manual playbook follows. For DoS the auto-block was safe; for an APT the same
@@ -646,11 +750,36 @@ signal; the allow-list injection rule and the `SSLE-C2` egress rule are both nea
 false positives, and `100130` fires live on the real chain. The limitations are the
 lesson: Wazuh's **cross-agent correlation constraint** forced a host-centric chain
 design (a genuine SIEM finding, not a workaround); the C2 signal exists only because the
-broad 80/443 egress rule exists — tighten that to an egress proxy and the reverse shell
-is *blocked* instead of *logged* (better prevention, and the leg simply moves to the drop
-log); same-tier `api→db` recon is not shipped because intra-bridge drops log under a
-different prefix the host agent filters out; and the DB-exfil leg is ambiguous by nature.
-Above all, the response is deliberately **not** automated — the DoS reflex would self-DoS
+broad 80/443 egress rule exists, and it only covers C2 inside the lab's actor network.
+Replace that rule with **egress only via an `apt` proxy** (proposed, not implemented) and
+the reverse shell is *blocked* instead of *logged*, wherever the attacker is (better
+prevention, and the leg simply moves to the drop log). Same-tier `api→db` recon is not
+shipped because intra-bridge drops log under a different prefix the host agent filters
+out, and the DB-exfil leg is ambiguous by nature.
+
+A sharper limitation concerns the chain rule itself: **discovery is not actually
+necessary**. The build script puts `DB_HOST` (`db-01.avr.pt.ssle`) in the same process
+environment as `DB_PASSWORD`, and `apps/api/app.py` reads both from it. The single
+`cat /proc/self/environ` that leaks the password therefore also names the target, so an
+attacker who skips the probe loses nothing. Such an attacker never triggers `100122`,
+and since `100130` requires C2 egress **and** recon, **the chain alert never fires**.
+Only the standalone `100121` (level 12) and `100123` alerts remain. Figure 8 draws
+discovery as an AND child because the PoC performed it, not because the attack requires
+it; the correlation therefore rests on the attacker's habits rather than on a necessary
+step. The two legs that *are* necessary — injection and C2 egress — are exactly the
+cross-agent pair Wazuh could not correlate, so fixing this needs the host-identity
+normalisation above, not a new rule.
+
+The last two steps have only weak defences. Against reading the credential, the
+playbook rotates `DB_PASSWORD` *after* the fact; the preventive node, **secrets out of
+env + rotation**, is proposed (`**`): a secret read once from a protected file or
+issued short-lived by a vault removes the one-line `/proc/self/environ` leak, and
+regular rotation shortens how long a stolen value works. It raises the cost, not the
+bar: code running as the application can still reach whatever the application can.
+Against the dump, the **pbkdf2-hashed passwords** mean the attacker steals hashes,
+not passwords, and must crack them offline. That protects `alice`'s passphrase, but not
+`bob`'s `password123`, which is in every wordlist and falls on the first guesses. A slow
+hash protects strong passwords only. Above all, the response is deliberately **not** automated — the DoS reflex would self-DoS
 a production host — so the real fixes live in password policy/MFA (§5.2) and input
 validation, not in the SIEM. The APT is the quiet opposite of the flood, and the reason
 per-event alerting alone is not enough: only correlation sees it.
@@ -697,7 +826,7 @@ not failing. Each threat is invisible to some layer and caught by another:
 | nginx edge (rate, 429 logs) | **catches + caps** | blind (0 × 429) | blind |
 | Prometheus aggregate (rate, CPU) | catches (unmitigated) | **catches** (`no_user`) | blind (no volume spike) |
 | Wazuh per-event + correlation | catches (who, block) | **catches** (distinct users) | **catches** (the chain) |
-| app controls (lockout, allow-list) | shields hash path | **stops** vertical brute | **prevents** injection |
+| app controls (lockout, allow-list) | shields hash path | **stops** vertical brute | would prevent injection (fix not deployed, §5.3) |
 
 The diagonal tells the story: once nginx rate-limiting is on, the DoS becomes invisible to
 the application's Prometheus metrics (the 429s never arrive), so the **edge** carries it;
@@ -712,7 +841,7 @@ layers would miss at least one of the three threats entirely.
 **The honest ceiling.** The clearest scalability result is a negative one: the DoS ramp
 measured a hard ceiling of **~50 req/s, bounded by four shared CPU cores**, and running a
 second API instance did *not* raise it. The architecture is designed to scale
-horizontally, but every instance and both notional sites share one physical VM, so
+horizontally, but every instance and both sites share one physical VM, so
 measured throughput is bounded by that host. "Scale" here is demonstrated in the *design*
 and *tooling*, not in raw capacity — and saying so is more useful than pretending a
 laptop-sized lab proves large-scale performance.
@@ -725,10 +854,19 @@ one per container (so observers do not multiply with the observed), the hierarch
 naming that lets metrics and alerts be filtered *by location* and resolved to an *owner*
 (fast incident-source location), and **federation** so that a second site's metrics are
 summarised locally and pulled in bulk rather than scraped individually across the link.
-The `lis` site is kept design-only; building it would turn the bandwidth-optimisation
-bonus from a described mechanism into measured bytes-per-minute — but, honestly, on one
-VM that saving is between bridges, not across a real WAN, so the measurement would
-demonstrate the *pattern*, not a real-world figure.
+Building `lis` turned this bonus from a described mechanism into measured bytes-per-minute,
+and the measurement is more interesting than the slogan. Over a 120 s window the
+directly-scraped `avr` sent ~5.3 kB/min toward the central Prometheus in 142 packets (a
+fresh scrape of each of its two app targets every 15 s), while the federated `lis` sent
+~22 kB/min in just **16** packets. Federation's structural win is real and visible — it
+collapses many per-target round-trips into one bulk pull per site (≈9× fewer packets) —
+but, with the default match-all selector (`{job=~".+"}`), that one pull ships the site's
+*entire* local dataset: 67 kB and 467 series, most of them Prometheus's own self-metrics.
+So federation as configured reduces **round-trips, not bytes**. The bandwidth saving lives
+in the *selector*: a selective `match[]` of the twelve series a cross-site dashboard
+actually needs is 1.85 kB — a **36× reduction** — which is where a production federation
+would sit. And on one VM even that saving is between bridges, not across a real WAN, so
+these figures demonstrate the *pattern*, not a real-world number.
 
 **The monitoring plane is itself a scale limit.** Under the volumetric flood the `lb-01`
 Wazuh agent hit its buffer and dropped events ("Events may be lost") exactly when the
@@ -782,7 +920,7 @@ studies, and that framing produced the report's main findings.
 **Why the solution is not perfect.** The limitations are consolidated here because they
 are part of the contribution, not caveats to hide:
 
-- **One physical host.** Every instance and both notional sites share one VM, so measured
+- **One physical host.** Every instance and both sites share one VM, so measured
   throughput is bounded (~50 req/s) and the federation bandwidth saving is between bridges,
   not across a WAN. Scale is shown in the design and tooling, not in raw capacity (§6.3).
 - **The monitoring plane has its own ceiling.** Under a volumetric flood the Wazuh agent
