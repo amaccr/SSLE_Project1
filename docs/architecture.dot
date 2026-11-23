@@ -3,7 +3,8 @@
 // report figure caption):
 //   black  = application call graph        red    = attack path (from inet)
 //   green dotted = Prometheus scrape/federate   purple dashed = Wazuh agent -> manager
-// Render:  dot -Tpng docs/architecture.dot -o images/architecture.png
+// Render:  dot -Tpng -Gdpi=300 docs/architecture.dot -o images/architecture.png
+// (no title inside the image: the report caption is the title)
 digraph arch {
   rankdir=TB;
   splines=true;
@@ -13,8 +14,6 @@ digraph arch {
   ranksep=0.85;
   bgcolor="white";
   fontname="Helvetica";
-  labelloc=t;
-  label=<<b>Figure 1 — Service architecture: zones, application call graph, and the monitoring/SIEM plane</b>>;
   fontsize=15;
 
   node [shape=box, style="rounded,filled", fillcolor=white, color="#30363d",
