@@ -996,6 +996,30 @@ tolerance, meaning how the service keeps running during an attack, and the two-A
 design, which already lets the service survive losing one backend (Section 5.3), is a
 natural starting point for it.
 
+**AI usage.** Throughout this project I used Claude Opus 4.8 (Anthropic) as an
+assistant, in the following ways:
+
+- **Reviewing my design decisions.** I decided the architecture and the naming scheme,
+  and asked the assistant for its opinion on those decisions and their trade-offs before
+  fixing them.
+- **Questioning the project.** I asked the assistant to ask me questions about the
+  project, which helped me find gaps in the design and prepare for the discussion.
+- **Help with code.** I used the assistant to help me write and debug parts of the code
+  and scripts.
+- **Commenting the scripts.** The assistant wrote the descriptive comments at the top of
+  my scripts.
+- **Plotting the metrics.** My screenshots of the Prometheus interface were low
+  resolution and hard to read, so I asked the assistant to query the Prometheus API and
+  build plots from that data to show the results more clearly. My own screenshots are
+  kept in the report as well.
+- **Structuring the demo.** The assistant helped me organise the demonstration into a
+  structured, step-by-step guide.
+- **Wording the report.** The assistant helped me improve the wording and clarity of the
+  report text.
+
+I reviewed and validated every decision, result and measurement in this report, and I
+remain responsible for its content.
+
 ## References
 
 [1] B. Schneier, "Attack Trees," *Dr. Dobb's Journal*, vol. 24, no. 12, Dec. 1999. [Online]. Available:
