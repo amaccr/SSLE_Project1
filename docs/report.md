@@ -27,8 +27,6 @@ contents. Section numbers are written by hand in the headings ("## 1. Introducti
 do not add --number-sections (it would print "1 1. Introduction"); --shift-heading-level-by
 makes "##" the top level. The four newunicodechar lines map the arrows and relations that
 the Latin Modern text font lacks to math symbols, so they don't print as blank boxes.
-The architecture figure is rebuilt from docs/architecture.dot with:
-  dot -Tpng -Gdpi=300 docs/architecture.dot -o images/architecture.png
 The attack-defence trees (Figs. 2, 4, 9, 11) are images/Adtree*.drawio.png: each PNG is
 its own source (draw.io embeds the diagram in it), so open it directly in draw.io
 (app.diagrams.net), edit, and export again as PNG (zoom 300%, "Include a copy of my
@@ -151,10 +149,11 @@ application call graph, and the monitoring/SIEM plane.
 
 ![](../images/architecture.png)
 
-*Figure 1. Service architecture. **Black** edges are the application call graph;
-**red** the attack path from the outside world; **green dotted** the Prometheus
-scrape and federation flows; **purple dashed** the Wazuh agent→manager flow (drawn
-once; every instance runs an agent). The dashed `analytics-01` box is design-only; the
+*Figure 1. Service architecture. **Solid** edges are application traffic (client →
+`lb-01` → `api-01/02` and `analytics-01` → `db-01`; analytics is read-only); **thick red**
+the attacker traffic from the outside world; **green dotted** the Prometheus scrape and
+federation flows. Wazuh is not drawn as edges: every instance and `h01` runs an agent that
+reports to `siem-01` (:1514/1515), as noted on its box. The dashed `analytics-01` box is design-only; the
 `lis` site is built (§6.3). The physical host `h01` runs every container and is observed, not
 trusted, by its own exporter and Wazuh agent.*
 
@@ -294,6 +293,10 @@ exporter per physical machine** on `:9101` rather than from inside each containe
 own numbers. `siem-01` runs Wazuh all-in-one, with an agent on every instance named by
 its fully-qualified name (short names repeat across sites) and a further agent on the
 physical host `h01` that ships the firewall and IDS logs the APT detection relies on.
+Figure 1 notes these agent links on `siem-01` instead of drawing them, because an edge from
+every instance would cross every Prometheus edge. The cost is that the figure does not show
+the manager receiving from both sites and from `h01`; only the note on `siem-01` and this
+paragraph say so.
 
 The design also anticipates **horizontal growth**: a second site, `lis`, is specified
 with its own database and a *local* Prometheus that the central one **federates**,
