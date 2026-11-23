@@ -358,9 +358,11 @@ UNIT
 
     # Host firewall for the site listeners: only a site's own Prometheus may reach its gateway:9101.
     # Separate nft table with a delete guard + policy accept, so it can never break other traffic (same
-    # pattern as config/ssle_ids.nft). Re-applied on every run; not persistent across reboot.
+    # pattern as config/ssle_ids.nft). Re-applied on every run, and persistent across reboots: the file
+    # lives in /etc/ssle/nft/, which the ssle-nft unit (installed by the host-agent step) loads at boot.
     if command -v nft > /dev/null; then
-        sudo nft -f - <<NFT
+        sudo install -d /etc/ssle/nft
+        sudo tee /etc/ssle/nft/ssle_exporter.nft > /dev/null <<NFT
 table inet ssle_exporter
 delete table inet ssle_exporter
 table inet ssle_exporter {
@@ -369,6 +371,7 @@ table inet ssle_exporter {
 $fed_rules    }
 }
 NFT
+        sudo nft -f /etc/ssle/nft/ssle_exporter.nft
     fi
     echo "host exporter: $listen"
 }
@@ -812,17 +815,27 @@ ensure_site_agents() {
 provision_client() {
     local p=$1 i=$2
     run_in "$p" "$i" test -x /usr/bin/curl || { run_in "$p" "$i" apt-get -qq update; apt_install "$p" "$i" curl; }
+    run_in "$p" "$i" test -x /usr/bin/python3 || apt_install "$p" "$i" python3
+    # Legitimate operator traffic (the credential-stuffing baseline). Pushed on every run so the copy in
+    # the container always matches the repo (docs/demo.md).
+    incus file push "$REPO/scripts/baseline_logins.py" "$i/root/" --project "$p"
     echo "instance $i: client ready"
 }
 
-# The adversary: curl for probing, plus the load tool used to generate the DoS flood against lb-01.
-# (Load tool chosen in the DoS threat section; added here once decided.)
+# The adversary: curl for probing, ab for the DoS flood, and the attack scripts of all three threats.
 provision_attacker() {
     local p=$1 i=$2
     run_in "$p" "$i" test -x /usr/bin/curl \
         || { run_in "$p" "$i" apt-get -qq update; apt_install "$p" "$i" curl; }
     # ab (apache2-utils): generates the DoS load and reports throughput + latency percentiles.
     run_in "$p" "$i" test -x /usr/bin/ab || apt_install "$p" "$i" apache2-utils
+    run_in "$p" "$i" test -x /usr/bin/python3 || apt_install "$p" "$i" python3
+    # Attack tooling, pushed on every run so a rebuilt lab is demo-ready (docs/demo.md):
+    #   login.json      DoS body: a real user with a wrong password, so every request pays the pbkdf2 hash
+    #   credstuffing.py threat 2 (single source, --slice I/N for the botnet, --brute-user for the lockout)
+    #   apt_chain.py    threat 3 (the kill chain; listens for the reverse shell on this host)
+    run_in "$p" "$i" sh -c "printf '%s' '{\"username\":\"alice\",\"password\":\"wrong\"}' > /root/login.json"
+    incus file push "$REPO/scripts/credstuffing.py" "$REPO/scripts/apt_chain.py" "$i/root/" --project "$p"
     echo "instance $i: attacker ready"
 }
 

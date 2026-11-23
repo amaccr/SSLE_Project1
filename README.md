@@ -2,20 +2,48 @@
 
 Threat detection, monitoring and prevention on a pure-Incus lab (SSLE, Universidade de Aveiro).
 
-## Layout
+A small sensor-portal service (nginx load balancer → 2× Flask API → PostgreSQL) in two sites, monitored
+by Prometheus (metrics, federation for the second site) and Wazuh (SIEM). It is attacked by three threats,
+each with detection and an action-response:
 
-| Path | What |
-|---|---|
-| `docs/` | Design decisions: `architecture.md` (instances, flows, DNS test), `naming.md` (naming scheme) |
-| `scripts/build.sh` | Builds the lab: `./scripts/build.sh core`, then `./scripts/build.sh site avr` |
-| `config/sites.conf` | The sites (name, region, subnet); adding a site = one line here + one `build.sh site` run |
-| `Projeto.pdf` | Teacher guidelines |
+| Threat | Detection | Response |
+|---|---|---|
+| DoS (login flood) | Prometheus rate/CPU alerts; Wazuh `100101` (nginx 429s per source) | nginx `limit_req` + Wazuh `firewall-drop` (automatic) |
+| Credential stuffing (+ botnet) | Prometheus `no_user` aggregate alert; Wazuh `100111` (distinct users per source) | per-account lockout + alert (no automatic block) |
+| APT (multi-stage) | Wazuh `100121` injection, `100123` C2 egress, `100122` recon, `100130` chain | alert-only + human incident-response playbook |
 
 ## Build
 
 ```bash
-./scripts/build.sh core        # once: ssle-mgmt + inet
-./scripts/build.sh site avr    # per site
+./scripts/build.sh core            # mgmt + inet zones (Prometheus, Wazuh, client, attackers)
+./scripts/build.sh site avr        # site 1
+./scripts/build.sh site lis        # site 2 (own Prometheus, federated)
+./scripts/build.sh host-exporter   # asks for sudo: per-host metrics exporter
+./scripts/build.sh host-agent      # asks for sudo: Wazuh agent on the host + IDS nft rule
 ```
 
-The script is idempotent: running it again leaves existing networks and instances as they are.
+Run it as your normal user (never `sudo ./scripts/build.sh`). Every step is idempotent, so running it
+again converges to the same state and deploys the current code. Adding a site means one line in
+`config/sites.conf`, its instances in `config/instances.conf`, and `./scripts/build.sh site <name>`.
+
+**Running the demo:** see [`docs/demo.md`](docs/demo.md) for the pre-flight check, each attack command,
+what to show in Prometheus and Wazuh, and how to reset between runs.
+
+## Layout
+
+| Path | What |
+|---|---|
+| `docs/report.md` | The report (build instructions for the PDF at the top) |
+| `docs/demo.md` | Demo runbook |
+| `docs/architecture.md`, `docs/naming.md` | Design decisions: instances, flows, firewall, DNS; the naming scheme |
+| `docs/threats/` | Working notes and measurements per threat (`dos.md`, `credstuffing.md`, `apt.md`) |
+| `scripts/build.sh` | Builds the whole lab |
+| `scripts/credstuffing.py`, `scripts/apt_chain.py` | Attack PoCs (copied to the attackers by `build.sh core`) |
+| `scripts/baseline_logins.py` | Legitimate login traffic (baseline) |
+| `scripts/plot_metrics.py`, `scripts/measure_bandwidth.sh` | Report figures from Prometheus; federation bandwidth measurement |
+| `scripts/provision_host_agent.sh` | Host Wazuh agent + IDS rule (called by `build.sh host-agent`) |
+| `apps/` | The API, the DB schema, the per-host exporter |
+| `wazuh/` | Custom rules (`local_rules.xml`) and the active-response block |
+| `config/` | Sites, instances, the IDS nft rule; generated secrets (git-ignored) |
+| `images/` | Report figures and evidence (screenshots, plots, the APT transcript) |
+| `Projeto.pdf` | Teacher guidelines |

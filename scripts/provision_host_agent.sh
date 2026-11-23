@@ -22,10 +22,31 @@ NAME="${WAZUH_AGENT_NAME:-h01.ssle}"       # the physical host, org-level asset 
 [ "$(id -u)" = 0 ] || { echo "run as root: sudo $0 $*" >&2; exit 1; }
 
 # Host IDS nft rule: logs the backend->external C2 egress the firewall allows (the "new outbound not in the
-# call graph" APT signal). Idempotent via the file's own delete-table guard. Not persistent across reboot;
-# re-applied by this script / build.sh on every (re)build.
+# call graph" APT signal). Idempotent via the file's own delete-table guard.
+# Persistent across reboots: the file is installed in /etc/ssle/nft/ and the ssle-nft oneshot unit loads
+# every file there at boot. Without this, a reboot silently removes the C2 leg (100123), so the APT chain
+# alert 100130 can never fire. The same unit also restores build.sh's ssle_exporter table.
 IDS="$(dirname "$(realpath "$0")")/../config/ssle_ids.nft"
-if [ -f "$IDS" ]; then /usr/sbin/nft -f "$IDS" && echo "host IDS nft rule loaded ($IDS)"; fi
+if [ -f "$IDS" ]; then
+    install -D -m 644 "$IDS" /etc/ssle/nft/ssle_ids.nft
+    /usr/sbin/nft -f /etc/ssle/nft/ssle_ids.nft && echo "host IDS nft rule loaded (/etc/ssle/nft/ssle_ids.nft)"
+fi
+# After nftables.service: Debian's own unit flushes the whole ruleset when it starts.
+cat > /etc/systemd/system/ssle-nft.service <<'UNIT'
+[Unit]
+Description=SSLE host nft tables (IDS C2 log, exporter firewall)
+After=nftables.service
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+ExecStart=/bin/sh -c 'for f in /etc/ssle/nft/*.nft; do [ -f "$f" ] && /usr/sbin/nft -f "$f"; done; true'
+
+[Install]
+WantedBy=multi-user.target
+UNIT
+systemctl daemon-reload
+systemctl enable ssle-nft.service >/dev/null 2>&1
 
 if [ ! -x /var/ossec/bin/wazuh-agentd ]; then
     echo "installing wazuh-agent $VER on the host as $NAME -> $MANAGER"

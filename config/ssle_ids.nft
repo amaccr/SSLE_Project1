@@ -15,7 +15,8 @@
 # Design (same rationale as before): a separate table so Incus's regeneration never touches it; on the
 # inet FORWARD hook, because this egress is ROUTED between bridges (avr -> inet) and so, being allowed,
 # reaches L3 forwarding (unlike the bridge-level ACL drops); LOG ONLY, no verdict, so it can never affect
-# connectivity. build.sh applies it so a rebuild keeps it.
+# connectivity. build.sh applies it so a rebuild keeps it, and the ssle-nft unit reloads it at boot
+# (installed as /etc/ssle/nft/ssle_ids.nft by scripts/provision_host_agent.sh).
 
 table inet ssle_ids
 delete table inet ssle_ids
