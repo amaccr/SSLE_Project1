@@ -1,6 +1,3 @@
 # Generated secrets (one file per site), never committed
 config/secrets-*.env
 __pycache__/
-
-# Playwright MCP scratch (snapshots, console logs)
-.playwright-mcp/

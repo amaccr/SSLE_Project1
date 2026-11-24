@@ -16,6 +16,11 @@ header-includes: |
   \newunicodechar{↔}{\ensuremath{\leftrightarrow}}
   \newunicodechar{≥}{\ensuremath{\geq}}
   \newunicodechar{≈}{\ensuremath{\approx}}
+include-before: |
+  **Project links**
+
+  - Source code repository: <https://github.com/amaccr/SSLE_Project1>
+  - Demo video (OneDrive): [watch the demo](https://uapt33090-my.sharepoint.com/:f:/g/personal/margaridacastro_ua_pt/IgD_y-LPqeFcR5v64ZpUTQLfAVxWIH3yTrTM9IXTCLuJWTo?e=Hv4vF5)
 ---
 
 ## 1. Introduction
